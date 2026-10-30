@@ -15,6 +15,9 @@ DST_TOKEN="${DST_TOKEN:-}"
 # Imposta a true se i cluster usano certificati autofirmati o CA interne non presenti nel trust store del bastion
 TLS_VERIFY="${TLS_VERIFY:-false}"
 
+# Modalità debug: mostra i comandi eseguiti
+DEBUG="${DEBUG:-false}"
+
 # ==========================================
 # FUNZIONI
 # ==========================================
@@ -29,6 +32,7 @@ Opzioni:
   -s <registry>   Host/Route del registry sorgente (default: $SRC_REGISTRY)
   -d <registry>   Host/Route del registry destinazione (default: $DST_REGISTRY)
   -k              Disabilita la verifica TLS/SSL (default: $TLS_VERIFY)
+  -v              Modalità debug: mostra i comandi skopeo eseguiti
   -h              Mostra questo messaggio di aiuto
 
 Esempi:
@@ -87,6 +91,14 @@ copy_image() {
         extra_args+=("--dest-creds=unused:${DST_TOKEN}")
     fi
 
+    if [[ "$DEBUG" == "true" ]]; then
+        local debug_args=()
+        for arg in "${extra_args[@]}"; do
+            debug_args+=("$(echo "$arg" | sed -E 's/(--[a-z]+-creds=)[^:]+:.*$/\1****:****/')")
+        done
+        echo "[DEBUG] skopeo copy ${debug_args[*]} ${src_url} ${dst_url}" >&2
+    fi
+
     if skopeo copy "${extra_args[@]}" "${src_url}" "${dst_url}"; then
         echo "✔ Copia completata: ${img_path}"
         return 0
@@ -115,12 +127,13 @@ process_line() {
 # ==========================================
 IMAGE_LIST_FILE=""
 
-while getopts "f:s:d:kh" opt; do
+while getopts "f:s:d:kvh" opt; do
     case "$opt" in
         f) IMAGE_LIST_FILE="$OPTARG" ;;
         s) SRC_REGISTRY="$OPTARG" ;;
         d) DST_REGISTRY="$OPTARG" ;;
         k) TLS_VERIFY="false" ;;
+        v) DEBUG="true" ;;
         h) usage ;;
         *) usage ;;
     esac
