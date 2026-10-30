@@ -70,6 +70,10 @@ copy_image() {
     img_path="${img_path#$SRC_REGISTRY/}"
     img_path="${img_path#docker://}"
 
+    if [[ "$img_path" != *:* ]]; then
+        echo "⚠ Attenzione: '$img_path' non ha un tag, skopeo userà ':latest' che potrebbe non esistere." >&2
+    fi
+
     local src_url="docker://${SRC_REGISTRY}/${img_path}"
     local dst_url="docker://${DST_REGISTRY}/${img_path}"
 
