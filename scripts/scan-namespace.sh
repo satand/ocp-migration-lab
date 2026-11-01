@@ -646,10 +646,14 @@ print_text_report() {
         echo "  (nessun secret utente trovato)"
     else
         printf '%s' "$secrets" | jq -r '
-            .[] |
-            "  \(if .unbounded then "[UNBOUNDED] " else "" end)\(.name)" +
-            "\n    type: \(.type)" +
-            "\n    keys: \(if (.keys | length) > 0 then .keys | join(", ") else "(vuoto)" end)"
+            def detail:
+                "    \(.name)" +
+                "\n      type: \(.type)" +
+                "\n      keys: \(if (.keys | length) > 0 then .keys | join(", ") else "(vuoto)" end)";
+            (["BOUNDED", "UNBOUNDED"][]) as $group |
+            "\n  [\($group)]",
+            (map(select(if $group == "UNBOUNDED" then .unbounded else (.unbounded | not) end))
+             | if length == 0 then "    (nessuno)" else (.[] | detail) end)
         '
     fi
 
@@ -661,9 +665,13 @@ print_text_report() {
         echo "  (nessuna configmap utente trovata)"
     else
         printf '%s' "$configmaps" | jq -r '
-            .[] |
-            "  \(if .unbounded then "[UNBOUNDED] " else "" end)\(.name)" +
-            "\n    keys: \(if (.keys | length) > 0 then .keys | join(", ") else "(vuoto)" end)"
+            def detail:
+                "    \(.name)" +
+                "\n      keys: \(if (.keys | length) > 0 then .keys | join(", ") else "(vuoto)" end)";
+            (["BOUNDED", "UNBOUNDED"][]) as $group |
+            "\n  [\($group)]",
+            (map(select(if $group == "UNBOUNDED" then .unbounded else (.unbounded | not) end))
+             | if length == 0 then "    (nessuno)" else (.[] | detail) end)
         '
     fi
 
@@ -675,11 +683,15 @@ print_text_report() {
         echo "  (nessun PVC trovato)"
     else
         printf '%s' "$pvcs" | jq -r '
-            .[] |
-            "  \(if .unbounded then "[UNBOUNDED] " else "" end)\(.name)" +
-            "\n    capacity:     \(.capacity)" +
-            "\n    accessModes:  \(.accessModes)" +
-            "\n    storageClass: \(.storageClass)"
+            def detail:
+                "    \(.name)" +
+                "\n      capacity:     \(.capacity)" +
+                "\n      accessModes:  \(.accessModes)" +
+                "\n      storageClass: \(.storageClass)";
+            (["BOUNDED", "UNBOUNDED"][]) as $group |
+            "\n  [\($group)]",
+            (map(select(if $group == "UNBOUNDED" then .unbounded else (.unbounded | not) end))
+             | if length == 0 then "    (nessuno)" else (.[] | detail) end)
         '
     fi
 
