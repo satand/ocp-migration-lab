@@ -191,12 +191,6 @@ cert_covers_host() {
     ' >/dev/null
 }
 
-cert_contains_domain() {
-    local domain="$1" sans_json="$2"
-    [[ -n "$domain" ]] || return 1
-    printf '%s' "$sans_json" | jq -e --arg domain "$domain" 'any(.[]; contains($domain))' >/dev/null
-}
-
 cert_is_expired() {
     local not_after="$1"
     local epoch now
@@ -267,19 +261,11 @@ decide_route() {
                 reason="il certificato non copre l'hostname '${host}'"
                 action="Sostituisci il certificato con uno che copra l'hostname della route"
             elif [[ "$host_bound" == true ]]; then
-                if cert_contains_domain "$src_domain" "$sans"; then
+                if [[ -z "$dest_host" ]] || ! cert_covers_host "$dest_host" "$sans"; then
                     status="blocked"
-                    reason="hostname e certificato sono legati al cluster sorgente (${src_domain})"
-                    action="Configura un hostname personalizzato e un certificato valido per il cluster destinazione, poi migra di nuovo"
-                elif [[ -z "$dest_host" ]] || ! cert_covers_host "$dest_host" "$sans"; then
-                    status="blocked"
-                    reason="l'hostname di default cambierà sul destinazione e il certificato non coprirà il nuovo host"
-                    action="Emetti un certificato che copra il dominio apps del cluster destinazione, oppure usa un hostname personalizzato"
+                    reason="l'hostname di default '${host}' cambierà sul destinazione e il certificato non copre il nuovo host"
+                    action="Usa un hostname personalizzato già coperto dal certificato, oppure emetti un certificato per il nuovo hostname"
                 fi
-            elif cert_contains_domain "$src_domain" "$sans"; then
-                status="blocked"
-                reason="il certificato contiene il dominio del cluster sorgente (${src_domain}) e non resterà valido dopo il cambio di puntamento"
-                action="Sostituisci il certificato con uno che non dipenda dal dominio del cluster sorgente"
             fi
         fi
     fi

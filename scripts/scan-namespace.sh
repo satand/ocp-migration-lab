@@ -560,17 +560,19 @@ enrich_routes_with_certs() {
                 --argjson ci "$cert_info" \
                 --arg apps_domain "$apps_domain" '
                 .host as $host |
-                ($ci.sans | any(
-                    if startswith("*.") then
-                        ($host | endswith(.[1:]))
-                    else
-                        . == $host
-                    end
-                )) as $match |
+                def covers($host):
+                    if startswith("*.") then ($host | endswith(.[1:]))
+                    else . == $host
+                    end;
+                ($ci.sans | map(select(covers($host)))) as $covering |
+                ($covering | length > 0) as $match |
+                (if $apps_domain != "" then
+                    ($covering | any(contains($apps_domain)))
+                 else false end) as $cluster_bound |
                 (if $apps_domain != "" then
                     ($ci.sans | any(contains($apps_domain)))
-                 else false end) as $cluster_bound |
-                . + {certInfo: ($ci + {certMatch: $match, clusterBound: $cluster_bound})} | del(.certPEM)
+                 else false end) as $has_cluster_san |
+                . + {certInfo: ($ci + {certMatch: $match, clusterBound: $cluster_bound, hasClusterSan: $has_cluster_san})} | del(.certPEM)
             ')
         else
             route_entry=$(printf '%s' "$route_entry" | jq 'del(.certPEM)')
@@ -729,7 +731,8 @@ print_text_report() {
                 "\n    cert wildcard: \(if .certInfo.wildcard then "yes" else "no" end)" +
                 "\n    cert match:   \(if .certInfo.certMatch then "yes" else "MISMATCH" end)" +
                 "\n    cert dedicato: \(if .certInfo.dedicatedCert then "yes (1 hostname)" else "no (multi-domain)" end)" +
-                "\n    cert legato al cluster: \(if .certInfo.clusterBound then "SI - certificato legato al dominio del cluster sorgente, non valido dopo migrazione" else "no" end)"
+                "\n    cert legato al cluster: \(if .certInfo.clusterBound then "SI - l'\''hostname di questa route e'\'' coperto da un nome del dominio cluster" else "no" end)" +
+                "\n    SAN del cluster sorgente: \(if .certInfo.hasClusterSan then "yes" else "no" end)"
             else "" end)
         '
     fi
@@ -893,9 +896,9 @@ if [[ "$rt_host_bound" -gt 0 ]]; then
 fi
 if [[ "$rt_cert_bound" -gt 0 ]]; then
     echo ""
-    echo "⚠ ${rt_cert_bound} route con certificato legato al cluster sorgente!"
-    echo "  Questi certificati contengono nei SAN il dominio '${SRC_APPS_DOMAIN}'"
-    echo "  e NON saranno validi dopo la migrazione su un altro cluster."
+    echo "⚠ ${rt_cert_bound} route il cui hostname è coperto da un certificato legato al dominio cluster '${SRC_APPS_DOMAIN}'"
+    echo "  Il controllo considera solo il nome della route, non gli altri SAN del certificato."
+    echo "  Se l'hostname cambierà in migrazione, quel certificato non coprirà il nuovo nome."
     echo "  Route interessate:"
     printf '%s' "$ROUTES_JSON" | jq -r '
         [.[] | select(.certInfo.clusterBound == true)] | .[] |
