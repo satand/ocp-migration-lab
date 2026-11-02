@@ -337,31 +337,22 @@ replace_domain_refs() {
 
 prepare_cm() {
     local name="$1"
-    local clean replace_existing=false
+    local clean exists_on_dst=false
 
     if oc --context "$DST_CONTEXT" -n "$NAMESPACE" get cm "$name" &>/dev/null; then
-        if [[ "$SKIP_CONFIRM" == "true" || ! -t 0 ]]; then
-            replace_existing=true
-            echo "⚠ La ConfigMap '$name' esiste già sul destinazione: verrà sostituita."
-        else
-            local ans
-            read -rp "La ConfigMap '$name' esiste già sul destinazione. Sostituire? [s/N] " ans
-            if [[ "$ans" =~ ^[sySY]$ ]]; then
-                replace_existing=true
-            else
-                echo "  Saltata."
-                SKIPPED_NAMES+=("$name")
-                return 0
-            fi
-        fi
+        exists_on_dst=true
     fi
 
+    echo "Esporto ConfigMap '$name' dal cluster sorgente..."
     if ! clean=$(export_and_clean_cm "$name"); then
         return 1
     fi
 
-    echo "ConfigMap '$name'$(if [[ "$replace_existing" == true ]]; then echo " [sostituzione]"; fi)"
+    echo "ConfigMap '$name'"
     resource_summary "$clean"
+    if [[ "$exists_on_dst" == "true" ]]; then
+        echo "  ⚠ Esiste già sul cluster destinazione"
+    fi
 
     if [[ "$DEBUG" == "true" ]]; then
         echo "[DEBUG] Definizione ConfigMap pulita:" >&2
@@ -370,20 +361,59 @@ prepare_cm() {
 
     READY_NAMES+=("$name")
     READY_JSON+=("$clean")
-    READY_REPLACE+=("$replace_existing")
+    READY_REPLACE+=("$exists_on_dst")
+}
+
+confirm_replacements() {
+    local i name ans
+    for i in "${!READY_NAMES[@]}"; do
+        [[ "${READY_REPLACE[$i]}" == "true" ]] || continue
+        name="${READY_NAMES[$i]}"
+        if [[ "$SKIP_CONFIRM" == "true" || ! -t 0 ]]; then
+            echo "⚠ La ConfigMap '$name' esiste già: verrà sostituita."
+            continue
+        fi
+        read -rp "La ConfigMap '$name' esiste già sul destinazione. Sostituire? [s/N] " ans
+        if [[ "$ans" =~ ^[sySY]$ ]]; then
+            echo "⚠ Attenzione: la sostituzione eliminerà e ricreerà la ConfigMap '$name'."
+        else
+            echo "  Saltata."
+            SKIPPED_NAMES+=("$name")
+            unset "READY_NAMES[$i]" "READY_JSON[$i]" "READY_REPLACE[$i]"
+        fi
+    done
+    # Compatta gli array dopo eventuali unset
+    local names=() jsons=() replaces=()
+    for i in "${!READY_NAMES[@]}"; do
+        names+=("${READY_NAMES[$i]}")
+        jsons+=("${READY_JSON[$i]}")
+        replaces+=("${READY_REPLACE[$i]}")
+    done
+    if [[ ${#names[@]} -gt 0 ]]; then
+        READY_NAMES=("${names[@]}")
+        READY_JSON=("${jsons[@]}")
+        READY_REPLACE=("${replaces[@]}")
+    else
+        READY_NAMES=()
+        READY_JSON=()
+        READY_REPLACE=()
+    fi
 }
 
 apply_cm() {
     local name="$1" json="$2" do_replace="$3"
 
     if [[ "$do_replace" == "true" ]]; then
+        echo "Elimino ConfigMap esistente '$name' sul cluster destinazione..."
         debug "oc --context $DST_CONTEXT -n $NAMESPACE delete cm $name"
-        if ! oc --context "$DST_CONTEXT" -n "$NAMESPACE" delete cm "$name" --wait=true 2>/dev/null; then
+        if ! oc --context "$DST_CONTEXT" -n "$NAMESPACE" delete cm "$name" --wait=true; then
             echo "Errore durante l'eliminazione della ConfigMap '$name' esistente." >&2
             return 1
         fi
+        echo "✔ ConfigMap eliminata, ricreo..."
     fi
 
+    echo "Creo ConfigMap '$name' sul cluster destinazione..."
     debug "oc --context $DST_CONTEXT -n $NAMESPACE apply -f - ($name)"
     if ! printf '%s\n' "$json" | oc --context "$DST_CONTEXT" -n "$NAMESPACE" apply -f - >/dev/null; then
         echo "Errore durante la creazione della ConfigMap '$name'." >&2
@@ -398,10 +428,9 @@ apply_cm() {
     fi
 }
 
-print_cluster_warnings() {
+print_cluster_refs() {
     local row
     [[ ${#CLUSTER_REF_WARNINGS[@]} -eq 0 ]] && return 0
-    echo ""
     echo "⚠ Riferimenti al cluster sorgente rilevati:"
     for row in "${CLUSTER_REF_WARNINGS[@]}"; do
         printf '%s\n' "$row" | jq -r '
@@ -410,6 +439,12 @@ print_cluster_warnings() {
             "      (pattern: \(.pattern))"
         '
     done
+}
+
+print_residual_warnings() {
+    [[ ${#CLUSTER_REF_WARNINGS[@]} -eq 0 ]] && return 0
+    echo ""
+    print_cluster_refs
     echo ""
     echo "Verifica e aggiorna manualmente questi valori sul cluster destinazione."
 }
@@ -422,9 +457,11 @@ print_replace_map() {
 
 ask_replace_refs() {
     if [[ "$REPLACE_REFS" == "true" ]]; then
+        echo "Sostituzione automatica dei riferimenti di dominio attiva (-R)."
         return 0
     fi
     if [[ "$SKIP_CONFIRM" == "true" || ! -t 0 ]]; then
+        echo "Riferimenti di dominio lasciati inalterati (usa -R per sostituirli automaticamente)."
         return 1
     fi
     local ans
@@ -518,16 +555,15 @@ detect_src_patterns
 detect_dst_patterns
 build_replace_map
 echo ""
-echo "Risorse da migrare:"
 
 for name in "${NAMES[@]}"; do
     if ! prepare_cm "$name"; then
         FAILED_NAMES+=("$name")
     fi
+    echo ""
 done
 
 if [[ ${#READY_NAMES[@]} -eq 0 ]]; then
-    echo ""
     echo "============================================================"
     echo "Riepilogo: 0 migrate, ${#FAILED_NAMES[@]} errori, ${#SKIPPED_NAMES[@]} saltate"
     if [[ ${#FAILED_NAMES[@]} -gt 0 ]]; then
@@ -536,6 +572,17 @@ if [[ ${#READY_NAMES[@]} -eq 0 ]]; then
             echo "  - $name"
         done
     fi
+    echo "============================================================"
+    if [[ ${#FAILED_NAMES[@]} -gt 0 ]]; then exit 1; fi
+    exit 0
+fi
+
+confirm_replacements
+
+if [[ ${#READY_NAMES[@]} -eq 0 ]]; then
+    echo ""
+    echo "============================================================"
+    echo "Riepilogo: 0 migrate, ${#FAILED_NAMES[@]} errori, ${#SKIPPED_NAMES[@]} saltate"
     if [[ ${#SKIPPED_NAMES[@]} -gt 0 ]]; then
         echo "Saltate:"
         for name in "${SKIPPED_NAMES[@]}"; do
@@ -543,38 +590,42 @@ if [[ ${#READY_NAMES[@]} -eq 0 ]]; then
         done
     fi
     echo "============================================================"
-    if [[ ${#FAILED_NAMES[@]} -gt 0 ]]; then exit 1; fi
     exit 0
 fi
 
-# Raccolta riferimenti al cluster sorgente pre-apply
+echo "Analizzo i valori per riferimenti ai domini del cluster sorgente..."
 for i in "${!READY_NAMES[@]}"; do
     collect_cluster_references "${READY_JSON[$i]}" "ConfigMap" "${READY_NAMES[$i]}" false
 done
 
-# Sostituzione domini se ci sono riferimenti e un mapping disponibile
-if [[ ${#CLUSTER_REF_WARNINGS[@]} -gt 0 && "$REPLACE_MAP_JSON" != "[]" ]]; then
+if [[ ${#CLUSTER_REF_WARNINGS[@]} -gt 0 ]]; then
     echo ""
-    print_cluster_warnings
-    print_replace_map
-    echo ""
-
-    if ask_replace_refs; then
-        echo "Sostituzione domini in corso..."
-        for i in "${!READY_NAMES[@]}"; do
-            local_replaced=$(replace_domain_refs "${READY_JSON[$i]}" false)
-            READY_JSON[$i]="$local_replaced"
-        done
-        CLUSTER_REF_WARNINGS=()
-        for i in "${!READY_NAMES[@]}"; do
-            collect_cluster_references "${READY_JSON[$i]}" "ConfigMap" "${READY_NAMES[$i]}" false
-        done
-        if [[ ${#CLUSTER_REF_WARNINGS[@]} -eq 0 ]]; then
-            echo "✔ Tutti i riferimenti al cluster sorgente sono stati sostituiti."
-        else
-            echo "⚠ Alcuni riferimenti non sono stati sostituiti (pattern senza mapping)."
+    print_cluster_refs
+    if [[ "$REPLACE_MAP_JSON" != "[]" ]]; then
+        echo ""
+        print_replace_map
+        echo ""
+        if ask_replace_refs; then
+            echo "Sostituzione domini in corso..."
+            for i in "${!READY_NAMES[@]}"; do
+                READY_JSON[$i]=$(replace_domain_refs "${READY_JSON[$i]}" false)
+            done
+            CLUSTER_REF_WARNINGS=()
+            for i in "${!READY_NAMES[@]}"; do
+                collect_cluster_references "${READY_JSON[$i]}" "ConfigMap" "${READY_NAMES[$i]}" false
+            done
+            if [[ ${#CLUSTER_REF_WARNINGS[@]} -eq 0 ]]; then
+                echo "✔ Tutti i riferimenti al cluster sorgente sono stati sostituiti."
+            else
+                echo "⚠ Alcuni riferimenti non sono stati sostituiti (pattern senza mapping)."
+            fi
         fi
+    else
+        echo ""
+        echo "Nessun mapping di sostituzione disponibile: i riferimenti andranno aggiornati manualmente."
     fi
+else
+    echo "✔ Nessun riferimento ai domini del cluster sorgente trovato."
 fi
 
 echo ""
@@ -594,9 +645,9 @@ for i in "${!READY_NAMES[@]}"; do
     else
         FAILED_NAMES+=("${READY_NAMES[$i]}")
     fi
+    echo ""
 done
 
-echo ""
 echo "============================================================"
 echo "Riepilogo: ${ok_count} migrate con successo (${#REPLACED_NAMES[@]} sostituite), ${#FAILED_NAMES[@]} errori, ${#SKIPPED_NAMES[@]} saltate"
 if [[ ${#FAILED_NAMES[@]} -gt 0 ]]; then
@@ -611,7 +662,7 @@ if [[ ${#SKIPPED_NAMES[@]} -gt 0 ]]; then
         echo "  - $name"
     done
 fi
-print_cluster_warnings
+print_residual_warnings
 echo "============================================================"
 
 if [[ ${#FAILED_NAMES[@]} -gt 0 ]]; then
