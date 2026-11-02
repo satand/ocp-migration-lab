@@ -6,7 +6,7 @@ Gli script di migrazione usano due context kubeconfig:
 
 - `-s` cluster sorgente, oppure `SRC_CONTEXT`
 - `-d` cluster destinazione, oppure `DST_CONTEXT`
-- `-n` namespace; se omesso, è il progetto corrente del context sorgente
+- namespace; se omesso, è il progetto corrente del context sorgente
 
 Il namespace deve già esistere sul cluster destinazione.
 
@@ -20,7 +20,8 @@ Il namespace deve già esistere sul cluster destinazione.
 
 | Script | Cosa fa |
 |---|---|
-| `scripts/scan-namespace.sh` | Report di workload, Secret, ConfigMap, PVC, Service e Route di un namespace |
+| `scripts/scan-namespace.sh` | Report di workload, Secret, ConfigMap, PVC, Service e Route di uno o più namespace |
+| `scripts/scan-to-html.sh` | Genera un report HTML interattivo dai JSON prodotti da `scan-namespace.sh` |
 | `scripts/copy-images.sh` | Copia immagini tra i registry interni dei due cluster con `skopeo` |
 | `scripts/migrate-pvc.sh` | Crea il PVC sul destinazione; con `-C` copia anche i dati |
 | `scripts/migrate-cm.sh` | Copia una o più ConfigMap |
@@ -32,11 +33,28 @@ Ogni script ha l'help con `-h`.
 ## Scan
 
 ```bash
-./scripts/scan-namespace.sh -s src-cluster -n my-project
-./scripts/scan-namespace.sh -s src-cluster -n my-project -o report.json
+./scripts/scan-namespace.sh -s src-cluster my-project
+./scripts/scan-namespace.sh -s src-cluster ns-alpha ns-beta ns-gamma
+./scripts/scan-namespace.sh -s src-cluster -o report.json my-project
 ```
 
+I namespace si passano come argomenti posizionali; se omessi, si usa il progetto corrente del context.
+
 Secret, ConfigMap e PVC sono divisi in `[BOUNDED]` e `[UNBOUNDED]`. Per le route con certificato esterno lo scan indica se l'hostname è coperto dal certificato e se hostname o SAN sono legati al dominio del cluster sorgente.
+
+### Report HTML
+
+A partire dal JSON prodotto dallo scan si può generare un report HTML autocontenuto:
+
+```bash
+./scripts/scan-to-html.sh -o report.html report.json
+```
+
+Il report offre filtro per namespace, ricerca libera case-insensitive su tutti i nomi degli oggetti, sezioni collassabili e un bottone per copiare ogni valore in clipboard. Si possono combinare più file JSON in un unico report:
+
+```bash
+./scripts/scan-to-html.sh -o combined.html scan-a.json scan-b.json
+```
 
 ## Migrazione
 

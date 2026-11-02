@@ -298,7 +298,7 @@ function esc(s) {
 }
 
 function copyBtn(val) {
-    return '<button class="copy-btn" onclick="copyVal(this)" data-val="' + esc(String(val)).replace(/'/g,'&#39;') + '">&#128203;<span class="tooltip">Copied!</span></button>';
+    return '<button class="copy-btn" onclick="copyVal(this,event)" data-val="' + esc(String(val)).replace(/'/g,'&#39;') + '">&#128203;<span class="tooltip">Copied!</span></button>';
 }
 
 function kvRow(key, val, cls) {
@@ -323,7 +323,8 @@ function toggleVis(header) {
     }
 }
 
-window.copyVal = function(btn) {
+window.copyVal = function(btn, ev) {
+    if (ev) ev.stopPropagation();
     const val = btn.getAttribute('data-val');
     navigator.clipboard.writeText(val).then(function() {
         btn.classList.add('copied');
@@ -367,7 +368,7 @@ function renderWorkload(w) {
 
     let h = '<div class="tree-item" data-name="' + esc(w.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
-    h += ' <span class="item-name">' + esc(w.name) + '</span>';
+    h += ' <span class="item-name">' + esc(w.name) + '</span>' + copyBtn(w.name);
     h += ' <span class="item-kind">' + esc(w.kind) + extra + '</span></div>';
     h += '<div class="item-body hidden">';
     h += kvRow('serviceAccount', w.serviceAccount);
@@ -384,7 +385,7 @@ function renderSecret(s) {
     const keys = (s.keys && s.keys.length > 0) ? s.keys.join(', ') : '(vuoto)';
     let h = '<div class="tree-item" data-name="' + esc(s.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
-    h += ' <span class="item-name">' + esc(s.name) + '</span>';
+    h += ' <span class="item-name">' + esc(s.name) + '</span>' + copyBtn(s.name);
     h += ' <span class="item-kind">' + esc(s.type) + '</span></div>';
     h += '<div class="item-body hidden">';
     h += kvRow('type', s.type);
@@ -397,7 +398,7 @@ function renderConfigMap(cm) {
     const keys = (cm.keys && cm.keys.length > 0) ? cm.keys.join(', ') : '(vuoto)';
     let h = '<div class="tree-item" data-name="' + esc(cm.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
-    h += ' <span class="item-name">' + esc(cm.name) + '</span></div>';
+    h += ' <span class="item-name">' + esc(cm.name) + '</span>' + copyBtn(cm.name) + '</div>';
     h += '<div class="item-body hidden">';
     h += kvRow('keys', keys);
     h += '</div></div>';
@@ -407,7 +408,7 @@ function renderConfigMap(cm) {
 function renderPVC(pvc) {
     let h = '<div class="tree-item" data-name="' + esc(pvc.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
-    h += ' <span class="item-name">' + esc(pvc.name) + '</span></div>';
+    h += ' <span class="item-name">' + esc(pvc.name) + '</span>' + copyBtn(pvc.name) + '</div>';
     h += '<div class="item-body hidden">';
     h += kvRow('capacity', pvc.capacity);
     h += kvRow('accessModes', pvc.accessModes);
@@ -424,7 +425,7 @@ function renderService(svc) {
         : 'N/A';
     let h = '<div class="tree-item" data-name="' + esc(svc.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
-    h += ' <span class="item-name">' + esc(svc.name) + '</span>';
+    h += ' <span class="item-name">' + esc(svc.name) + '</span>' + copyBtn(svc.name);
     h += ' <span class="item-kind">' + esc(svc.type) + '</span></div>';
     h += '<div class="item-body hidden">';
     h += kvRow('type', svc.type);
@@ -443,7 +444,7 @@ function renderRoute(r) {
 
     let h = '<div class="tree-item" data-name="' + esc(r.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
-    h += ' <span class="item-name">' + esc(r.name) + '</span>' + badges + '</div>';
+    h += ' <span class="item-name">' + esc(r.name) + '</span>' + copyBtn(r.name) + badges + '</div>';
     h += '<div class="item-body hidden">';
     h += kvRow('host', r.host);
     h += kvRow('path', r.path);
