@@ -49,7 +49,7 @@ Durante la scansione di ConfigMap e Secret, lo script analizza i valori delle si
 | Tipo | Pattern riconosciuti | Proprietà estratte |
 |---|---|---|
 | **JDBC** | `jdbc:postgresql://`, `jdbc:mysql://`, `jdbc:oracle:` … | host, port, database, username |
-| **MongoDB** | `mongodb://`, `mongodb+srv://` | host, port, database, username |
+| **MongoDB** | `mongodb://`, `mongodb+srv://`, chiave con `mongo*.host` | host, port, database, authDatabase, username |
 | **Redis** | `redis://`, `rediss://` | host, port, database |
 | **Keycloak** | URL con `/realms/`, hostname contenente `keycloak` o `sso` | host, port, realm, clientId |
 | **Kafka** | `bootstrap-servers`, `bootstrap.servers`, chiave con `kafka.*bootstrap` | bootstrapServers, topic, consumerGroup, securityProtocol, saslMechanism, username |

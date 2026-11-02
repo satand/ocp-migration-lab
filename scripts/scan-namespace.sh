@@ -237,6 +237,12 @@ def sibling($entries; $pat):
    | select(.key | is_sensitive_key | not) | .value]
   | if length > 0 then .[0] else null end;
 
+def sibling_pfx($entries; $pfx; $pat):
+  [$entries[] | select(.key | ascii_downcase | startswith($pfx))
+   | select(.key | ascii_downcase | ltrimstr($pfx) | test("^" + $pat + "$"))
+   | select(.key | is_sensitive_key | not) | .value]
+  | if length > 0 then .[0] else null end;
+
 def inval($pat):
   ([try capture($pat; "i") catch null] | if length > 0 then .[0].v else null end);
 
@@ -259,7 +265,7 @@ def detect_deps:
         else empty end
        else empty end),
 
-      # --- MongoDB ---
+      # --- MongoDB (URL) ---
       (if ($v | test("mongodb"; "i")) then
         (try ($v | capture("(?<url>mongodb(?:\\+srv)?://(?:(?<user>[^:@\\s]+)(?::[^@\\s]*)?@)?(?<host>[^:/\\s,\"]+)(?::(?<port>[0-9]+))?(?:[/](?<db>[^?\\s\"]+))?)"; "i")) catch null) as $m |
         if $m then {type:"mongodb", subtype:null, key:$k, url:$m.url,
@@ -268,6 +274,23 @@ def detect_deps:
             database:($m.db // sibling($entries; "database|db[._-]?name")),
             username:($m.user // sibling($entries; "username|user$"))
           } | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- MongoDB (key-name based: mongo*.host) ---
+      (if (($k | ascii_downcase | test("mongo.*[._-]hosts?$")) and ($v | test("^mongodb"; "i") | not)) then
+        ([$k | ascii_downcase | capture("(?<pfx>.+[._-])hosts?$")] | if length > 0 then .[0].pfx else null end) as $pfx |
+        if $pfx then
+          sibling_pfx($entries; $pfx; "port") as $port |
+          {type:"mongodb", subtype:null, key:$k,
+           url:("mongodb://" + ($v | split(",") | .[0]) + (if $port then ":" + $port else "" end)),
+           properties:({
+             host:$v,
+             port:$port,
+             database:sibling_pfx($entries; $pfx; "database"),
+             authDatabase:sibling_pfx($entries; $pfx; "authentication-database"),
+             username:sibling_pfx($entries; $pfx; "username")
+           } | clean_props)}
         else empty end
        else empty end),
 
