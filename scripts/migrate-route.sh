@@ -16,6 +16,7 @@ DST_APPS_DOMAIN=""
 READY_ITEMS=()
 BLOCKED_ITEMS=()
 FAILED_NAMES=()
+SKIPPED_NAMES=()
 
 # ==========================================
 # FUNZIONI
@@ -26,6 +27,8 @@ Uso: $0 [OPZIONI] <route-name> [route-name ...]
 
 Migra una o più Route da un cluster OpenShift sorgente a uno destinazione,
 insieme al Service associato se non esiste già sul destinazione.
+Se una Route esiste già sul destinazione, viene chiesta conferma per
+sostituirla (con -y la sostituzione è automatica).
 
 Prima di migrare verifica hostname e, se presente, il certificato esterno:
   - il certificato non deve essere scaduto
@@ -367,10 +370,23 @@ prepare_route() {
         raw=$(printf '%s' "$raw" | jq --arg ns "$NAMESPACE" '.metadata.namespace = $ns')
     fi
 
+    local replace_existing=false
     if oc --context "$DST_CONTEXT" -n "$NAMESPACE" get route "$name" &>/dev/null; then
-        echo "Errore: la route '$name' esiste già sul cluster destinazione." >&2
-        jq -n --arg name "$name" '{name:$name, status:"blocked", reason:"route già presente sul cluster destinazione", action:"Rimuovi o rinomina la route di destinazione se vuoi sostituirla", dnsAction:"", host:"", service:"", hostClusterBound:false, dropHost:false, hasExternalCert:false}'
-        return 0
+        if [[ "$SKIP_CONFIRM" == "true" || ! -t 0 ]]; then
+            replace_existing=true
+            echo "⚠ La route '$name' esiste già sul destinazione: verrà sostituita."
+        else
+            local ans
+            read -rp "La route '$name' esiste già sul destinazione. Sostituire? [s/N] " ans
+            if [[ "$ans" =~ ^[sySY]$ ]]; then
+                replace_existing=true
+            else
+                echo "  Saltata."
+                SKIPPED_NAMES+=("$name")
+                jq -n --arg name "$name" '{name:$name, status:"skipped", reason:"sostituzione rifiutata dall'\''utente", action:"", dnsAction:"", host:"", service:"", hostClusterBound:false, dropHost:false, hasExternalCert:false}'
+                return 0
+            fi
+        fi
     fi
 
     decision=$(decide_route "$raw" "$SRC_APPS_DOMAIN" "$DST_APPS_DOMAIN")
@@ -381,7 +397,7 @@ prepare_route() {
     if [[ "$status" == "ready" ]]; then
         local cleaned
         cleaned=$(clean_route_json "$raw" "$drop_host")
-        printf '%s' "$decision" | jq --argjson route "$cleaned" '. + {route: $route}'
+        printf '%s' "$decision" | jq --argjson route "$cleaned" --argjson rep "$replace_existing" '. + {route: $route, replaceExisting: $rep}'
     else
         printf '%s' "$decision"
     fi
@@ -412,13 +428,22 @@ migrate_service_if_needed() {
 
 apply_route_item() {
     local item="$1"
-    local name svc route_json
+    local name svc route_json do_replace
     name=$(printf '%s' "$item" | jq -r '.name')
     svc=$(printf '%s' "$item" | jq -r '.service')
     route_json=$(printf '%s' "$item" | jq -c '.route')
+    do_replace=$(printf '%s' "$item" | jq -r '.replaceExisting // false')
 
     if ! migrate_service_if_needed "$svc"; then
         return 1
+    fi
+
+    if [[ "$do_replace" == "true" ]]; then
+        debug "oc --context $DST_CONTEXT -n $NAMESPACE delete route $name"
+        if ! oc --context "$DST_CONTEXT" -n "$NAMESPACE" delete route "$name" --wait=true 2>/dev/null; then
+            echo "Errore durante l'eliminazione della route '$name' esistente." >&2
+            return 1
+        fi
     fi
 
     debug "Creo route '$name' sul destinazione"
@@ -426,7 +451,12 @@ apply_route_item() {
         echo "Errore durante la creazione della route '$name'." >&2
         return 1
     fi
-    echo "✔ Route '$name' creata sul cluster destinazione"
+
+    if [[ "$do_replace" == "true" ]]; then
+        echo "✔ Route '$name' sostituita sul cluster destinazione"
+    else
+        echo "✔ Route '$name' creata sul cluster destinazione"
+    fi
 }
 
 print_plan() {
@@ -464,7 +494,7 @@ print_summary() {
     local item
     echo ""
     echo "============================================================"
-    echo "Riepilogo: ${migrated} migrate, ${#BLOCKED_ITEMS[@]} bloccate, ${#FAILED_NAMES[@]} errori"
+    echo "Riepilogo: ${migrated} migrate, ${#BLOCKED_ITEMS[@]} bloccate, ${#SKIPPED_NAMES[@]} saltate, ${#FAILED_NAMES[@]} errori"
 
     if [[ "$migrated" -gt 0 ]]; then
         echo ""
@@ -492,6 +522,14 @@ print_summary() {
             printf '%s' "$item" | jq -r '
                 "  - \(.name): \(.reason)\n      → \(.action)"
             '
+        done
+    fi
+
+    if [[ ${#SKIPPED_NAMES[@]} -gt 0 ]]; then
+        echo ""
+        echo "Saltate:"
+        for item in "${SKIPPED_NAMES[@]}"; do
+            echo "  - $item"
         done
     fi
 
@@ -597,6 +635,8 @@ for name in "${NAMES[@]}"; do
     status=$(printf '%s' "$item" | jq -r '.status')
     if [[ "$status" == "ready" ]]; then
         READY_ITEMS+=("$item")
+    elif [[ "$status" == "skipped" ]]; then
+        true
     else
         BLOCKED_ITEMS+=("$item")
     fi

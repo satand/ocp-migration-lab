@@ -25,7 +25,10 @@ Uso: $0 [OPZIONI] <pvc-name>
 
 Migra un PersistentVolumeClaim da un cluster OpenShift sorgente a uno destinazione.
 Nome, namespace, dimensioni, access mode, label e annotazioni non cluster-specifiche
-vengono preservati. La StorageClass di destinazione viene risolta in questo ordine:
+vengono preservati. Se il PVC esiste già sul destinazione, viene chiesta conferma
+per sostituirlo (con -y la sostituzione è automatica).
+
+La StorageClass di destinazione viene risolta in questo ordine:
 override esplicito (-c), mapping file (-m), stessa SC del sorgente. Se la SC
 scelta non esiste sul cluster destinazione, lo script chiede quale usare
 (oppure termina con errore se è attivo -y).
@@ -515,10 +518,24 @@ if ! oc --context "$DST_CONTEXT" get namespace "$PVC_NAMESPACE" &>/dev/null; the
 fi
 echo "✔ Namespace '$PVC_NAMESPACE' presente su entrambi i cluster"
 
-# Verifica che il PVC non esista già sul destinazione
+# Verifica se il PVC esiste già sul destinazione
+REPLACE_PVC=false
 if oc --context "$DST_CONTEXT" -n "$PVC_NAMESPACE" get pvc "$PVC_NAME" &>/dev/null; then
-    echo "Errore: il PVC '$PVC_NAME' esiste già nel namespace '$PVC_NAMESPACE' sul cluster destinazione." >&2
-    exit 1
+    if [[ "$SKIP_CONFIRM" == "true" || ! -t 0 ]]; then
+        REPLACE_PVC=true
+        echo "⚠ Il PVC '$PVC_NAME' esiste già sul destinazione: verrà sostituito."
+    else
+        read -rp "Il PVC '$PVC_NAME' esiste già sul destinazione. Sostituire? [s/N] " ans
+        if [[ "$ans" =~ ^[sySY]$ ]]; then
+            REPLACE_PVC=true
+        else
+            echo "Operazione annullata."
+            exit 0
+        fi
+    fi
+    if [[ "$REPLACE_PVC" == "true" ]]; then
+        echo "⚠ Attenzione: la sostituzione eliminerà il PVC e il volume associato sul destinazione."
+    fi
 fi
 
 # Esporta e pulisci il PVC
@@ -572,11 +589,23 @@ if [[ "$SKIP_CONFIRM" != "true" ]]; then
     fi
 fi
 
-# Crea il PVC sul cluster destinazione
+# Crea (o sostituisci) il PVC sul cluster destinazione
 echo ""
+if [[ "$REPLACE_PVC" == "true" ]]; then
+    echo "Elimino PVC esistente sul cluster destinazione..."
+    if ! oc --context "$DST_CONTEXT" -n "$PVC_NAMESPACE" delete pvc "$PVC_NAME" --wait=true 2>/dev/null; then
+        echo "Errore durante l'eliminazione del PVC '$PVC_NAME' esistente." >&2
+        exit 1
+    fi
+    echo "✔ PVC eliminato, ricreo..."
+fi
 echo "Creo PVC sul cluster destinazione..."
 echo "$CLEAN_PVC" | oc --context "$DST_CONTEXT" -n "$PVC_NAMESPACE" apply -f - >/dev/null
-echo "✔ PVC '$PVC_NAME' creato sul cluster destinazione"
+if [[ "$REPLACE_PVC" == "true" ]]; then
+    echo "✔ PVC '$PVC_NAME' sostituito sul cluster destinazione"
+else
+    echo "✔ PVC '$PVC_NAME' creato sul cluster destinazione"
+fi
 
 # Copia dati (opzionale)
 if [[ "$COPY_DATA" == "true" ]]; then

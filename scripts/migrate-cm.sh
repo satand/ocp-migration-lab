@@ -11,12 +11,18 @@ DEBUG="${DEBUG:-false}"
 
 NAMESPACE=""
 SKIP_CONFIRM=false
+REPLACE_REFS=false
 SRC_PATTERNS=()
 SRC_PATTERNS_JSON="[]"
+DST_DOMAINS=()
+REPLACE_MAP_JSON="[]"
 CLUSTER_REF_WARNINGS=()
 READY_NAMES=()
 READY_JSON=()
+READY_REPLACE=()
 FAILED_NAMES=()
+SKIPPED_NAMES=()
+REPLACED_NAMES=()
 
 # ==========================================
 # FUNZIONI
@@ -28,12 +34,19 @@ Uso: $0 [OPZIONI] <cm-name> [cm-name ...]
 Migra una o più ConfigMap da un cluster OpenShift sorgente a uno destinazione.
 Nome, namespace, dati, label e annotazioni non cluster-specifiche vengono preservati.
 
+Se una ConfigMap esiste già sul cluster destinazione, viene chiesta conferma
+per sostituirla (cancellazione e ricreazione). Con -y la sostituzione è automatica.
+
 Opzioni:
   -s <context>    Context oc/kubectl del cluster sorgente (obbligatorio)
   -d <context>    Context oc/kubectl del cluster destinazione (obbligatorio)
   -n <namespace>  Namespace delle ConfigMap
                   (default: progetto corrente del context sorgente)
-  -y              Salta la conferma interattiva
+  -R              Sostituisci automaticamente i riferimenti al dominio del
+                  cluster sorgente con quello del cluster destinazione.
+                  Senza -R viene chiesta conferma se vengono trovati riferimenti.
+  -y              Salta tutte le conferme interattive (inclusa sostituzione
+                  di risorse esistenti)
   -v              Modalità debug
   -h              Mostra questo messaggio di aiuto
 
@@ -45,6 +58,7 @@ Esempi:
   $0 -s cluster-a -d cluster-b my-config
   $0 -s cluster-a -d cluster-b -n my-project cm-a cm-b cm-c
   $0 -s cluster-a -d cluster-b -y my-config
+  $0 -s cluster-a -d cluster-b -R -y cm-a cm-b
 EOF
     exit 1
 }
@@ -78,7 +92,6 @@ check_cluster_access() {
     echo "✔ Connesso a $label come '$user' (context: $context)"
 }
 
-# Imposta NAMESPACE al progetto corrente del context sorgente.
 resolve_namespace() {
     local context="$1"
     local ns
@@ -137,17 +150,14 @@ add_pattern() {
     SRC_PATTERNS+=("$candidate")
 }
 
-# Raccoglie hostname API, dominio apps e dominio base del cluster sorgente.
-detect_src_patterns() {
+# Estrae i domini di un cluster: echo "api_host apps_domain base_domain"
+detect_cluster_domains() {
+    local context="$1"
     local server host apps base
-    SRC_PATTERNS=()
 
-    server=$(oc config view --context "$SRC_CONTEXT" --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)
+    server=$(oc config view --context "$context" --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)
     host=$(printf '%s' "$server" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/.*##; s#:[0-9]+$##')
-    apps=$(oc --context "$SRC_CONTEXT" get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)
-
-    add_pattern "$host"
-    add_pattern "$apps"
+    apps=$(oc --context "$context" get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)
 
     base=""
     if [[ -n "$host" && -n "$apps" ]]; then
@@ -157,6 +167,19 @@ detect_src_patterns() {
     elif [[ "$apps" == api.* || "$apps" == apps.* ]]; then
         base="${apps#*.}"
     fi
+
+    echo "${host:-}" "${apps:-}" "${base:-}"
+}
+
+detect_src_patterns() {
+    local domains
+    SRC_PATTERNS=()
+
+    domains=($(detect_cluster_domains "$SRC_CONTEXT"))
+    local host="${domains[0]:-}" apps="${domains[1]:-}" base="${domains[2]:-}"
+
+    add_pattern "$host"
+    add_pattern "$apps"
     add_pattern "$base"
 
     if [[ ${#SRC_PATTERNS[@]} -eq 0 ]]; then
@@ -175,6 +198,46 @@ detect_src_patterns() {
     SRC_PATTERNS_JSON=$(printf '%s\n' "${SRC_PATTERNS[@]}" | jq -R . | jq -s .)
     echo "Pattern del cluster sorgente: $(printf '%s, ' "${SRC_PATTERNS[@]}" | sed 's/, $//')"
     debug "SRC_PATTERNS_JSON=$SRC_PATTERNS_JSON"
+}
+
+detect_dst_patterns() {
+    local domains
+    DST_DOMAINS=()
+
+    domains=($(detect_cluster_domains "$DST_CONTEXT"))
+    DST_DOMAINS=("${domains[@]}")
+    local host="${DST_DOMAINS[0]:-}" apps="${DST_DOMAINS[1]:-}" base="${DST_DOMAINS[2]:-}"
+
+    if [[ -n "$host" || -n "$apps" || -n "$base" ]]; then
+        echo "Pattern del cluster destinazione: $(echo "$host $apps $base" | xargs | tr ' ' ', ')"
+    fi
+}
+
+build_replace_map() {
+    [[ "$SRC_PATTERNS_JSON" == "[]" ]] && return 0
+
+    local src_domains dst_domains
+    src_domains=($(detect_cluster_domains "$SRC_CONTEXT"))
+    dst_domains=("${DST_DOMAINS[@]:-}")
+
+    local src_host="${src_domains[0]:-}" src_apps="${src_domains[1]:-}" src_base="${src_domains[2]:-}"
+    local dst_host="${dst_domains[0]:-}" dst_apps="${dst_domains[1]:-}" dst_base="${dst_domains[2]:-}"
+
+    local pairs=()
+    [[ -n "$src_apps" && -n "$dst_apps" && "$src_apps" != "$dst_apps" ]] && pairs+=("{\"src\":$(printf '%s' "$src_apps" | jq -R .),\"dst\":$(printf '%s' "$dst_apps" | jq -R .)}")
+    [[ -n "$src_host" && -n "$dst_host" && "$src_host" != "$dst_host" ]] && pairs+=("{\"src\":$(printf '%s' "$src_host" | jq -R .),\"dst\":$(printf '%s' "$dst_host" | jq -R .)}")
+    [[ -n "$src_base" && -n "$dst_base" && "$src_base" != "$dst_base" ]] && pairs+=("{\"src\":$(printf '%s' "$src_base" | jq -R .),\"dst\":$(printf '%s' "$dst_base" | jq -R .)}")
+
+    if [[ ${#pairs[@]} -eq 0 ]]; then
+        REPLACE_MAP_JSON="[]"
+        return 0
+    fi
+
+    local joined
+    joined=$(printf '%s,' "${pairs[@]}")
+    joined="${joined%,}"
+    REPLACE_MAP_JSON=$(printf '[%s]' "$joined" | jq '[sort_by(-.src | length)]')
+    debug "REPLACE_MAP_JSON=$REPLACE_MAP_JSON"
 }
 
 export_and_clean_cm() {
@@ -217,8 +280,6 @@ resource_summary() {
     echo "  chiavi data: $data_count, binaryData: $binary_count, labels: $labels"
 }
 
-# Accumula in CLUSTER_REF_WARNINGS i valori che contengono un pattern del cluster sorgente.
-# decode=true per i Secret (data è base64). Non stampa nulla.
 collect_cluster_references() {
     local json="$1" rtype="$2" rname="$3" decode="$4"
     [[ "$SRC_PATTERNS_JSON" == "[]" ]] && return 0
@@ -256,20 +317,50 @@ collect_cluster_references() {
     done <<< "$out"
 }
 
+replace_domain_refs() {
+    local json="$1" decode="$2"
+    [[ "$REPLACE_MAP_JSON" == "[]" ]] && printf '%s' "$json" && return 0
+
+    printf '%s\n' "$json" | jq --argjson map "$REPLACE_MAP_JSON" --argjson decode "$decode" '
+        if $decode then
+            .data //= {} | .data |= with_entries(
+                .value |= (. as $b64 | try (($b64 | @base64d) as $v |
+                    reduce $map[] as $m ($v; gsub($m.src; $m.dst)) | @base64) catch $b64)
+            )
+        else
+            .data //= {} | .data |= with_entries(
+                .value |= reduce $map[] as $m (.; gsub($m.src; $m.dst))
+            )
+        end
+    '
+}
+
 prepare_cm() {
     local name="$1"
-    local clean
+    local clean replace_existing=false
 
     if oc --context "$DST_CONTEXT" -n "$NAMESPACE" get cm "$name" &>/dev/null; then
-        echo "Errore: la ConfigMap '$name' esiste già nel namespace '$NAMESPACE' sul cluster destinazione." >&2
-        return 1
+        if [[ "$SKIP_CONFIRM" == "true" || ! -t 0 ]]; then
+            replace_existing=true
+            echo "⚠ La ConfigMap '$name' esiste già sul destinazione: verrà sostituita."
+        else
+            local ans
+            read -rp "La ConfigMap '$name' esiste già sul destinazione. Sostituire? [s/N] " ans
+            if [[ "$ans" =~ ^[sySY]$ ]]; then
+                replace_existing=true
+            else
+                echo "  Saltata."
+                SKIPPED_NAMES+=("$name")
+                return 0
+            fi
+        fi
     fi
 
     if ! clean=$(export_and_clean_cm "$name"); then
         return 1
     fi
 
-    echo "ConfigMap '$name'"
+    echo "ConfigMap '$name'$(if [[ "$replace_existing" == true ]]; then echo " [sostituzione]"; fi)"
     resource_summary "$clean"
 
     if [[ "$DEBUG" == "true" ]]; then
@@ -279,17 +370,32 @@ prepare_cm() {
 
     READY_NAMES+=("$name")
     READY_JSON+=("$clean")
+    READY_REPLACE+=("$replace_existing")
 }
 
 apply_cm() {
-    local name="$1" json="$2"
+    local name="$1" json="$2" do_replace="$3"
+
+    if [[ "$do_replace" == "true" ]]; then
+        debug "oc --context $DST_CONTEXT -n $NAMESPACE delete cm $name"
+        if ! oc --context "$DST_CONTEXT" -n "$NAMESPACE" delete cm "$name" --wait=true 2>/dev/null; then
+            echo "Errore durante l'eliminazione della ConfigMap '$name' esistente." >&2
+            return 1
+        fi
+    fi
+
     debug "oc --context $DST_CONTEXT -n $NAMESPACE apply -f - ($name)"
     if ! printf '%s\n' "$json" | oc --context "$DST_CONTEXT" -n "$NAMESPACE" apply -f - >/dev/null; then
         echo "Errore durante la creazione della ConfigMap '$name'." >&2
         return 1
     fi
-    echo "✔ ConfigMap '$name' creata sul cluster destinazione"
-    collect_cluster_references "$json" "ConfigMap" "$name" false
+
+    if [[ "$do_replace" == "true" ]]; then
+        echo "✔ ConfigMap '$name' sostituita sul cluster destinazione"
+        REPLACED_NAMES+=("$name")
+    else
+        echo "✔ ConfigMap '$name' creata sul cluster destinazione"
+    fi
 }
 
 print_cluster_warnings() {
@@ -308,14 +414,33 @@ print_cluster_warnings() {
     echo "Verifica e aggiorna manualmente questi valori sul cluster destinazione."
 }
 
+print_replace_map() {
+    [[ "$REPLACE_MAP_JSON" == "[]" ]] && return 0
+    echo "Mapping di sostituzione domini:"
+    printf '%s\n' "$REPLACE_MAP_JSON" | jq -r '.[] | "  \(.src) → \(.dst)"'
+}
+
+ask_replace_refs() {
+    if [[ "$REPLACE_REFS" == "true" ]]; then
+        return 0
+    fi
+    if [[ "$SKIP_CONFIRM" == "true" || ! -t 0 ]]; then
+        return 1
+    fi
+    local ans
+    read -rp "Sostituire i riferimenti al dominio sorgente con quello destinazione? [s/N] " ans
+    [[ "$ans" =~ ^[sySY]$ ]]
+}
+
 # ==========================================
 # PARSING ARGOMENTI
 # ==========================================
-while getopts "s:d:n:yvh" opt; do
+while getopts "s:d:n:Ryvh" opt; do
     case "$opt" in
         s) SRC_CONTEXT="$OPTARG" ;;
         d) DST_CONTEXT="$OPTARG" ;;
         n) NAMESPACE="$OPTARG" ;;
+        R) REPLACE_REFS=true ;;
         y) SKIP_CONFIRM=true ;;
         v) DEBUG=true ;;
         h) usage ;;
@@ -390,6 +515,8 @@ echo "✔ Namespace '$NAMESPACE' presente su entrambi i cluster"
 echo ""
 
 detect_src_patterns
+detect_dst_patterns
+build_replace_map
 echo ""
 echo "Risorse da migrare:"
 
@@ -402,15 +529,52 @@ done
 if [[ ${#READY_NAMES[@]} -eq 0 ]]; then
     echo ""
     echo "============================================================"
-    echo "Riepilogo: 0 migrate con successo, ${#FAILED_NAMES[@]} errori"
+    echo "Riepilogo: 0 migrate, ${#FAILED_NAMES[@]} errori, ${#SKIPPED_NAMES[@]} saltate"
     if [[ ${#FAILED_NAMES[@]} -gt 0 ]]; then
         echo "Non migrate:"
         for name in "${FAILED_NAMES[@]}"; do
             echo "  - $name"
         done
     fi
+    if [[ ${#SKIPPED_NAMES[@]} -gt 0 ]]; then
+        echo "Saltate:"
+        for name in "${SKIPPED_NAMES[@]}"; do
+            echo "  - $name"
+        done
+    fi
     echo "============================================================"
-    exit 1
+    if [[ ${#FAILED_NAMES[@]} -gt 0 ]]; then exit 1; fi
+    exit 0
+fi
+
+# Raccolta riferimenti al cluster sorgente pre-apply
+for i in "${!READY_NAMES[@]}"; do
+    collect_cluster_references "${READY_JSON[$i]}" "ConfigMap" "${READY_NAMES[$i]}" false
+done
+
+# Sostituzione domini se ci sono riferimenti e un mapping disponibile
+if [[ ${#CLUSTER_REF_WARNINGS[@]} -gt 0 && "$REPLACE_MAP_JSON" != "[]" ]]; then
+    echo ""
+    print_cluster_warnings
+    print_replace_map
+    echo ""
+
+    if ask_replace_refs; then
+        echo "Sostituzione domini in corso..."
+        for i in "${!READY_NAMES[@]}"; do
+            local_replaced=$(replace_domain_refs "${READY_JSON[$i]}" false)
+            READY_JSON[$i]="$local_replaced"
+        done
+        CLUSTER_REF_WARNINGS=()
+        for i in "${!READY_NAMES[@]}"; do
+            collect_cluster_references "${READY_JSON[$i]}" "ConfigMap" "${READY_NAMES[$i]}" false
+        done
+        if [[ ${#CLUSTER_REF_WARNINGS[@]} -eq 0 ]]; then
+            echo "✔ Tutti i riferimenti al cluster sorgente sono stati sostituiti."
+        else
+            echo "⚠ Alcuni riferimenti non sono stati sostituiti (pattern senza mapping)."
+        fi
+    fi
 fi
 
 echo ""
@@ -425,7 +589,7 @@ fi
 echo ""
 ok_count=0
 for i in "${!READY_NAMES[@]}"; do
-    if apply_cm "${READY_NAMES[$i]}" "${READY_JSON[$i]}"; then
+    if apply_cm "${READY_NAMES[$i]}" "${READY_JSON[$i]}" "${READY_REPLACE[$i]}"; then
         (( ok_count++ )) || true
     else
         FAILED_NAMES+=("${READY_NAMES[$i]}")
@@ -434,10 +598,16 @@ done
 
 echo ""
 echo "============================================================"
-echo "Riepilogo: ${ok_count} migrate con successo, ${#FAILED_NAMES[@]} errori"
+echo "Riepilogo: ${ok_count} migrate con successo (${#REPLACED_NAMES[@]} sostituite), ${#FAILED_NAMES[@]} errori, ${#SKIPPED_NAMES[@]} saltate"
 if [[ ${#FAILED_NAMES[@]} -gt 0 ]]; then
     echo "Non migrate:"
     for name in "${FAILED_NAMES[@]}"; do
+        echo "  - $name"
+    done
+fi
+if [[ ${#SKIPPED_NAMES[@]} -gt 0 ]]; then
+    echo "Saltate:"
+    for name in "${SKIPPED_NAMES[@]}"; do
         echo "  - $name"
     done
 fi

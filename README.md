@@ -108,7 +108,32 @@ Si possono combinare più file JSON in un unico report:
 ./scripts/migrate-route.sh -s src-cluster -d dst-cluster -n my-project web
 ```
 
+### Sostituzione risorse esistenti
+
+Se una risorsa esiste già sul cluster destinazione, tutti gli script `migrate-*` chiedono conferma prima di sostituirla (cancellazione e ricreazione). Con `-y` la sostituzione è automatica:
+
+```bash
+./scripts/migrate-cm.sh -s src-cluster -d dst-cluster -y -n my-project app-config
+```
+
+### Sostituzione riferimenti al dominio sorgente
+
+`migrate-cm.sh` e `migrate-secret.sh` rilevano i valori che contengono riferimenti al dominio del cluster sorgente (hostname API, dominio apps, dominio base). Prima dell'apply, mostrano i riferimenti trovati e chiedono se sostituirli con i domini del cluster destinazione.
+
+Con `-R` la sostituzione avviene automaticamente senza chiedere:
+
+```bash
+./scripts/migrate-cm.sh -s src-cluster -d dst-cluster -R -n my-project app-config
+./scripts/migrate-secret.sh -s src-cluster -d dst-cluster -R -y -n my-project db-creds
+```
+
+Il mapping viene costruito automaticamente dai domini dei due cluster (es. `apps.ocp4-src.example.com` → `apps.ocp4-dst.example.com`). I riferimenti che non corrispondono a nessun mapping restano inalterati e vengono segnalati nel riepilogo finale.
+
+### Route
+
 `migrate-route.sh` migra una route con certificato esterno solo se il certificato non è scaduto, copre l'hostname della route e resta valido sul destinazione. Se l'hostname è quello generato da OpenShift, non viene copiato. Il riepilogo indica se aggiornare il DNS esterno.
+
+### PVC
 
 Per i PVC, `-c` forza la StorageClass di destinazione e `-m` legge un mapping `sorgente=destinazione`. Se la StorageClass non esiste sul destinazione, lo script chiede quale usare.
 
