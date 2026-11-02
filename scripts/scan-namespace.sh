@@ -222,6 +222,151 @@ def format_imagepullsecrets:
     end;
 '
 
+# ==========================================
+# RILEVAMENTO DIPENDENZE DA CM/SECRET VALUES
+# ==========================================
+JQ_DETECT_DEPS='
+def is_sensitive_key:
+  ascii_downcase | test("password|passwd|secret|token|credential|_pass$|_pwd$|private[._]?key|tls[._]?key");
+
+def clean_props:
+  with_entries(select(.value != null and .value != ""));
+
+def sibling($entries; $pat):
+  [$entries[] | select(.key | ascii_downcase | test($pat))
+   | select(.key | is_sensitive_key | not) | .value]
+  | if length > 0 then .[0] else null end;
+
+def inval($pat):
+  ([try capture($pat; "i") catch null] | if length > 0 then .[0].v else null end);
+
+def detect_deps:
+  . as $entries |
+  [ $entries[] |
+    select(.value != null and (.value | type == "string") and (.value | length > 0)) |
+    .key as $k | .value as $v |
+    (
+      # --- JDBC ---
+      (if ($v | test("jdbc:"; "i")) then
+        (try ($v | capture("(?<url>jdbc:(?<sub>[a-z0-9]+):[/]*(?:(?<user>[^:@\\s]+)(?::[^@\\s]*)?@)?(?<host>[^:/\\s;,\"]+)(?::(?<port>[0-9]+))?(?:[/](?<db>[^?;\\s\"]+))?)"; "i")) catch null) as $m |
+        if $m then {type:"jdbc", subtype:$m.sub, key:$k, url:$m.url,
+          properties:({
+            host:$m.host,
+            port:($m.port // null),
+            database:($m.db // ($v | inval("database[=: ]+(?<v>[^\\s\"]+)")) // sibling($entries; "database|db[._-]?name|dbname")),
+            username:($m.user // ($v | inval("(?:username|user)[=: ]+(?<v>[^\\s\"]+)")) // sibling($entries; "username|db[._-]?user"))
+          } | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- MongoDB ---
+      (if ($v | test("mongodb"; "i")) then
+        (try ($v | capture("(?<url>mongodb(?:\\+srv)?://(?:(?<user>[^:@\\s]+)(?::[^@\\s]*)?@)?(?<host>[^:/\\s,\"]+)(?::(?<port>[0-9]+))?(?:[/](?<db>[^?\\s\"]+))?)"; "i")) catch null) as $m |
+        if $m then {type:"mongodb", subtype:null, key:$k, url:$m.url,
+          properties:({
+            host:$m.host, port:($m.port // null),
+            database:($m.db // sibling($entries; "database|db[._-]?name")),
+            username:($m.user // sibling($entries; "username|user$"))
+          } | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- Redis ---
+      (if ($v | test("rediss?://"; "i")) then
+        (try ($v | capture("(?<url>rediss?://(?:(?<user>[^:@\\s]+)?(?::[^@\\s]*)?@)?(?<host>[^:/\\s\"]+)(?::(?<port>[0-9]+))?(?:[/](?<db>[0-9]+))?)"; "i")) catch null) as $m |
+        if $m then {type:"redis", subtype:null, key:$k, url:$m.url,
+          properties:({host:$m.host, port:($m.port // null), database:($m.db // null)} | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- Keycloak (URL con /realms/) ---
+      (if ($v | test("[/]realms[/]"; "i")) then
+        (try ($v | capture("(?<url>https?://(?<host>[^:/\\s\"]+)(?::(?<port>[0-9]+))?[^\\s\"]*?[/]realms[/](?<realm>[^/\\s\"]+))"; "i")) catch null) as $m |
+        if $m then {type:"keycloak", subtype:null, key:$k, url:$m.url,
+          properties:({
+            host:$m.host, port:($m.port // null), realm:$m.realm,
+            clientId:(sibling($entries; "client[._-]?id|resource") // ($v | inval("(?:client-id|resource)[=: ]+(?<v>[^\\s\"]+)")))
+          } | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- Keycloak (hostname keycloak/sso) ---
+      (if (($v | test("https?://[^/\\s]*(?:keycloak|sso)"; "i")) and ($v | test("[/]realms[/]"; "i") | not)) then
+        (try ($v | capture("(?<url>https?://(?<host>[^:/\\s\"]*(?:keycloak|sso)[^:/\\s\"]*)(?::(?<port>[0-9]+))?)"; "i")) catch null) as $m |
+        if $m then {type:"keycloak", subtype:null, key:$k, url:$m.url,
+          properties:({
+            host:$m.host, port:($m.port // null),
+            realm:(sibling($entries; "realm") // ($v | inval("realm[=: ]+(?<v>[^\\s\"]+)"))),
+            clientId:(sibling($entries; "client[._-]?id|resource") // ($v | inval("(?:client-id|resource)[=: ]+(?<v>[^\\s\"]+)")))
+          } | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- Kafka (in-value bootstrap-servers) ---
+      (if ($v | test("bootstrap[._-]?servers"; "i")) then
+        (($v | inval("bootstrap[._-]?servers[=: ]+(?<v>[^\\s\"]+)")) // null) as $bs |
+        if $bs then {type:"kafka", subtype:null, key:$k, url:$bs,
+          properties:({
+            bootstrapServers:$bs,
+            topic:(sibling($entries; "topic") // ($v | inval("(?:^|[._-])topics?[=: ]+(?<v>[^\\s\"]+)"))),
+            consumerGroup:(sibling($entries; "group[._-]?id|consumer[._-]?group") // ($v | inval("group[._-]?id[=: ]+(?<v>[^\\s\"]+)"))),
+            securityProtocol:(sibling($entries; "security[._-]?protocol") // ($v | inval("(?:security[._-])?protocol[=: ]+(?<v>SASL_(?:SSL|PLAINTEXT)|PLAINTEXT|SSL)"))),
+            saslMechanism:(sibling($entries; "sasl[._-]?mechanism") // ($v | inval("(?:sasl[._-])?mechanism[=: ]+(?<v>SCRAM-SHA-(?:256|512)|PLAIN|OAUTHBEARER|GSSAPI)"))),
+            username:(sibling($entries; "(?:kafka|sasl)[._-]?user(?:name)?$") // ($v | inval("username[=]\"(?<v>[^\"]+)\"")) // ($v | inval("sasl[._-]?(?:jaas[._-]?)?username[=: ]+(?<v>[^\\s\"]+)")))
+          } | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- Kafka (key-name based) ---
+      (if (($k | ascii_downcase | test("kafka.*bootstrap|bootstrap.*server|kafka.*broker")) and ($v | test(":[0-9]+")) and ($v | test("jdbc:|https?:|mongo|redis|amqp"; "i") | not)) then
+        {type:"kafka", subtype:null, key:$k, url:$v,
+          properties:({
+            bootstrapServers:($v | gsub("[\\s]+"; "")),
+            topic:(sibling($entries; "topic")),
+            consumerGroup:(sibling($entries; "group[._-]?id|consumer[._-]?group")),
+            securityProtocol:(sibling($entries; "security[._-]?protocol")),
+            saslMechanism:(sibling($entries; "sasl[._-]?mechanism")),
+            username:(sibling($entries; "(?:kafka|sasl)[._-]?user(?:name)?$"))
+          } | clean_props)}
+       else empty end),
+
+      # --- AMQP ---
+      (if ($v | test("amqps?://"; "i")) then
+        (try ($v | capture("(?<url>amqps?://(?:(?<user>[^:@\\s]+)?(?::[^@\\s]*)?@)?(?<host>[^:/\\s\"]+)(?::(?<port>[0-9]+))?)"; "i")) catch null) as $m |
+        if $m then {type:"amqp", subtype:null, key:$k, url:$m.url,
+          properties:({
+            host:$m.host, port:($m.port // null), username:($m.user // null),
+            queue:(sibling($entries; "queue|destination")),
+            topic:(sibling($entries; "topic"))
+          } | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- ActiveMQ (failover, tcp/ssl con activemq/artemis/61616) ---
+      (if ($v | test("failover:\\("; "i")) or
+          (($v | test("(?:tcp|ssl)://"; "i")) and
+           (($v | test("activemq|artemis|:61616|:61617"; "i")) or ($k | ascii_downcase | test("activemq|artemis|broker|amq|jms"))))
+       then
+        (try ($v | capture("(?<url>(?:tcp|ssl)://(?<host>[^:/\\s,)\"]+)(?::(?<port>[0-9]+))?)"; "i")) catch null) as $m |
+        if $m then {type:"activemq", subtype:null, key:$k, url:$m.url,
+          properties:({
+            host:$m.host, port:($m.port // null),
+            queue:(sibling($entries; "queue|destination") // ($v | inval("(?:queue|destination)[=: ]+(?<v>[^\\s\"]+)")))
+          } | clean_props)}
+        else empty end
+       else empty end),
+
+      # --- Servizio interno (*.svc / *.svc.cluster.local) ---
+      (if ($v | test("https?://[^/\\s]*\\.svc"; "i")) then
+        (try ($v | capture("(?<url>https?://(?<host>[^:/\\s\"]+\\.svc[^:/\\s\"]*)(?::(?<port>[0-9]+))?(?<path>[/][^\\s\"]*)?)"; "i")) catch null) as $m |
+        if $m then {type:"service", subtype:"internal", key:$k, url:$m.url,
+          properties:({host:$m.host, port:($m.port // null), path:($m.path // null)} | clean_props)}
+        else empty end
+       else empty end)
+    )
+  ] | unique_by(.type + "/" + (.subtype // "") + "/" + .url) | sort_by(.type + "/" + (.subtype // ""));
+'
+
 build_workload_jq() {
     cat <<'JQEOF'
 ${JQ_PROBE}
@@ -399,18 +544,22 @@ collect_all_refs() {
 # ==========================================
 parse_secrets() {
     local storage_json="$1" refs_json="$2"
-    printf '%s' "$storage_json" | jq --argjson refs "$refs_json" '
+    printf '%s' "$storage_json" | jq --argjson refs "$refs_json" \
+        "${JQ_DETECT_DEPS}"'
         [.items[] | select(.kind == "Secret") |
             select(.type != "kubernetes.io/service-account-token"
                and .type != "kubernetes.io/dockercfg"
                and .type != "kubernetes.io/dockerconfigjson") |
             select(.metadata.name |
                 (startswith("builder-") or startswith("deployer-") or startswith("default-")) | not) |
+            (.data // {} | to_entries |
+                map(. + {value: (try (.value | @base64d) catch .value)})) as $data_entries |
             {
                 name: .metadata.name,
                 type: (.type // "Opaque"),
                 keys: ([.data // {} | keys[]] | sort),
-                unbounded: ([ .metadata.name ] | inside($refs.secrets) | not)
+                unbounded: ([ .metadata.name ] | inside($refs.secrets) | not),
+                dependencies: ($data_entries | detect_deps)
             }
         ] | sort_by(.name)
     '
@@ -421,14 +570,17 @@ parse_secrets() {
 # ==========================================
 parse_configmaps() {
     local storage_json="$1" refs_json="$2"
-    printf '%s' "$storage_json" | jq --argjson refs "$refs_json" '
+    printf '%s' "$storage_json" | jq --argjson refs "$refs_json" \
+        "${JQ_DETECT_DEPS}"'
         [.items[] | select(.kind == "ConfigMap") |
             select(.metadata.name != "kube-root-ca.crt"
                and .metadata.name != "openshift-service-ca.crt") |
+            (.data // {} | to_entries) as $data_entries |
             {
                 name: .metadata.name,
                 keys: ([(.data // {} | keys[]), (.binaryData // {} | keys[])] | sort),
-                unbounded: ([ .metadata.name ] | inside($refs.configmaps) | not)
+                unbounded: ([ .metadata.name ] | inside($refs.configmaps) | not),
+                dependencies: ($data_entries | detect_deps)
             }
         ] | sort_by(.name)
     '
@@ -647,10 +799,19 @@ print_text_report() {
         echo "  (nessun secret utente trovato)"
     else
         printf '%s' "$secrets" | jq -r '
+            def fmt_props:
+                [to_entries[] | "\(.key): \(.value)"] | join("  ");
+            def fmt_deps:
+                if (.dependencies // [] | length) == 0 then ""
+                else "\n      [deps]" + (.dependencies[] |
+                    "\n        \(.type)\(if .subtype then "/\(.subtype)" else "" end) (key: \(.key))" +
+                    "\n          \(.properties | fmt_props)")
+                end;
             def detail:
                 "    \(.name)" +
                 "\n      type: \(.type)" +
-                "\n      keys: \(if (.keys | length) > 0 then .keys | join(", ") else "(vuoto)" end)";
+                "\n      keys: \(if (.keys | length) > 0 then .keys | join(", ") else "(vuoto)" end)" +
+                fmt_deps;
             (["BOUNDED", "UNBOUNDED"][]) as $group |
             "\n  [\($group)]",
             (map(select(if $group == "UNBOUNDED" then .unbounded else (.unbounded | not) end))
@@ -666,9 +827,18 @@ print_text_report() {
         echo "  (nessuna configmap utente trovata)"
     else
         printf '%s' "$configmaps" | jq -r '
+            def fmt_props:
+                [to_entries[] | "\(.key): \(.value)"] | join("  ");
+            def fmt_deps:
+                if (.dependencies // [] | length) == 0 then ""
+                else "\n      [deps]" + (.dependencies[] |
+                    "\n        \(.type)\(if .subtype then "/\(.subtype)" else "" end) (key: \(.key))" +
+                    "\n          \(.properties | fmt_props)")
+                end;
             def detail:
                 "    \(.name)" +
-                "\n      keys: \(if (.keys | length) > 0 then .keys | join(", ") else "(vuoto)" end)";
+                "\n      keys: \(if (.keys | length) > 0 then .keys | join(", ") else "(vuoto)" end)" +
+                fmt_deps;
             (["BOUNDED", "UNBOUNDED"][]) as $group |
             "\n  [\($group)]",
             (map(select(if $group == "UNBOUNDED" then .unbounded else (.unbounded | not) end))
@@ -765,9 +935,71 @@ build_structured_report() {
         --argjson routes "$routes" \
         --arg namespace "$NAMESPACE" \
         --arg context "$CONTEXT" \
+        --arg apps_domain "$SRC_APPS_DOMAIN" \
         '{
             context: $context,
             namespace: $namespace,
+            summary: {
+                totals: {
+                    workloads: ($workloads | length),
+                    secrets: ($secrets | length),
+                    configmaps: ($configmaps | length),
+                    pvcs: ($pvcs | length),
+                    services: ($services | length),
+                    routes: ($routes | length)
+                },
+                unbounded: {
+                    secrets: ([$secrets[] | select(.unbounded)] | length),
+                    configmaps: ([$configmaps[] | select(.unbounded)] | length),
+                    pvcs: ([$pvcs[] | select(.unbounded)] | length)
+                },
+                warnings: (
+                    [
+                        ([$routes[] | select(.hostClusterBound == true)] |
+                            if length > 0 then {
+                                type: "hostClusterBound",
+                                message: "\(length) route con hostname legato al cluster sorgente (dominio: \($apps_domain))",
+                                detail: "L hostname cambiera dopo la migrazione. Aggiornare DNS o configurare hostname personalizzati.",
+                                routes: [.[] | {name: .name, host: .host}]
+                            } else empty end),
+                        ([$routes[] | select(.certInfo.clusterBound == true)] |
+                            if length > 0 then {
+                                type: "certClusterBound",
+                                message: "\(length) route il cui hostname e coperto da certificato legato al dominio cluster \($apps_domain)",
+                                detail: "Se l hostname cambiera in migrazione, quel certificato non coprira il nuovo nome. Azione richiesta: rigenerare i certificati.",
+                                routes: [.[] | {name: .name, host: .host, sans: .certInfo.sans}]
+                            } else empty end),
+                        ([$routes[] | select(.certInfo.hasClusterSan == true and (.certInfo.clusterBound | not))] |
+                            if length > 0 then {
+                                type: "hasClusterSan",
+                                message: "\(length) route con SAN del certificato che riferiscono al dominio cluster \($apps_domain), ma l hostname non e direttamente legato",
+                                detail: "Il certificato contiene SAN legati al cluster sorgente, anche se l hostname di questa route non e tra quelli.",
+                                routes: [.[] | {name: .name, host: .host, sans: .certInfo.sans}]
+                            } else empty end),
+                        ([$routes[] | select(.certInfo.certMatch == false)] |
+                            if length > 0 then {
+                                type: "certMismatch",
+                                message: "\(length) route il cui certificato NON copre l hostname della route",
+                                detail: "Il certificato non e valido per l hostname attuale della route.",
+                                routes: [.[] | {name: .name, host: .host, sans: .certInfo.sans}]
+                            } else empty end)
+                    ]
+                ),
+                dependencies: (
+                    [
+                        ($secrets[] | .name as $n | (.dependencies // [])[] | . + {source: {kind: "Secret", name: $n}}),
+                        ($configmaps[] | .name as $n | (.dependencies // [])[] | . + {source: {kind: "ConfigMap", name: $n}})
+                    ]
+                    | group_by(.type + "/" + (.subtype // ""))
+                    | map({
+                        type: .[0].type,
+                        subtype: .[0].subtype,
+                        sources: [.[] | {kind: .source.kind, name: .source.name, key: .key}] | unique,
+                        properties: (map(.properties) | add // {}),
+                        urls: [.[].url] | unique
+                    })
+                )
+            },
             workloads: $workloads,
             secrets: $secrets,
             configmaps: $configmaps,
@@ -888,6 +1120,27 @@ scan_one_namespace() {
             "    - \(.name) (host: \(.host), SANs: \(.certInfo.sans | join(", ")))"
         '
         echo "  Azione richiesta: rigenerare i certificati per il dominio del cluster destinazione."
+    fi
+
+    # Dipendenze rilevate
+    local all_deps
+    all_deps=$(printf '%s\n%s' "$SECRETS_JSON" "$CONFIGMAPS_JSON" | jq -s '
+        [ (.[0] // [])[] | .name as $n | (.dependencies // [])[] | . + {source: ("Secret/" + $n)} ] +
+        [ (.[1] // [])[] | .name as $n | (.dependencies // [])[] | . + {source: ("ConfigMap/" + $n)} ]
+        | group_by(.type + "/" + (.subtype // ""))
+    ')
+    local dep_count
+    dep_count=$(printf '%s' "$all_deps" | jq 'length')
+    if [[ "$dep_count" -gt 0 ]]; then
+        echo ""
+        echo "Dipendenze rilevate:"
+        printf '%s' "$all_deps" | jq -r '
+            .[] | .[0] as $first |
+            "  \($first.type)\(if $first.subtype then "/\($first.subtype)" else "" end)" +
+            "  ->  " + ([.[].url] | unique | join(", ")) +
+            "\n    " + ([.[].properties | to_entries[] | "\(.key): \(.value)"] | unique | join("  ")) +
+            "\n    fonte: " + ([.[] | "\(.source) (key: \(.key))"] | unique | join(", "))
+        '
     fi
     echo "============================================================"
 

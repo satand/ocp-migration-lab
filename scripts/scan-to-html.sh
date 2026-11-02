@@ -241,6 +241,75 @@ body {
 /* Highlight for search matches */
 .search-highlight { background: #ffeaa7; border-radius: 2px; padding: 0 1px; }
 
+/* Summary panel */
+.summary-panel {
+    background: #f8f9fa; border-bottom: 2px solid #dfe6e9; padding: 12px 20px;
+}
+.summary-totals {
+    display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px;
+}
+.summary-stat {
+    background: #dfe6e9; border-radius: 4px; padding: 4px 12px; font-size: 13px;
+    display: flex; align-items: center; gap: 6px;
+}
+.summary-stat .stat-count { font-weight: 700; font-size: 16px; color: #2d3436; }
+.summary-stat .stat-label { color: #636e72; }
+.summary-unbounded {
+    font-size: 12px; color: #636e72; margin-bottom: 8px;
+}
+.summary-warning {
+    background: #ffeaa7; border-left: 4px solid #fdcb6e; border-radius: 0 4px 4px 0;
+    padding: 8px 12px; margin: 6px 0; font-size: 13px;
+}
+.summary-warning.error {
+    background: #fab1a0; border-left-color: #d63031;
+}
+.summary-warning .warn-title { font-weight: 600; margin-bottom: 2px; }
+.summary-warning .warn-detail { color: #636e72; font-size: 12px; margin-bottom: 4px; }
+.summary-warning .warn-routes { font-size: 12px; font-family: monospace; color: #2d3436; }
+
+/* Dependency badges and cards */
+.dep-badge {
+    display: inline-block; border-radius: 3px; padding: 0 6px;
+    font-size: 10px; font-weight: 600; margin-left: 6px; vertical-align: middle;
+}
+.dep-badge.db { background: #74b9ff; color: #2d3436; }
+.dep-badge.cache { background: #00b894; color: #fff; }
+.dep-badge.auth { background: #fdcb6e; color: #2d3436; }
+.dep-badge.msg { background: #a29bfe; color: #fff; }
+.dep-badge.svc { background: #636e72; color: #fff; }
+.dep-card {
+    background: #f8f9fa; border: 1px solid #dfe6e9; border-radius: 4px;
+    padding: 6px 10px; margin: 4px 0; font-size: 12px;
+}
+.dep-card .dep-type {
+    display: inline-block; font-weight: 700; border-radius: 3px;
+    padding: 1px 8px; font-size: 11px; margin-right: 8px;
+}
+.dep-card .dep-type.db { background: #74b9ff; color: #2d3436; }
+.dep-card .dep-type.cache { background: #00b894; color: #fff; }
+.dep-card .dep-type.auth { background: #fdcb6e; color: #2d3436; }
+.dep-card .dep-type.msg { background: #a29bfe; color: #fff; }
+.dep-card .dep-type.svc { background: #636e72; color: #fff; }
+.dep-card .dep-url { font-family: monospace; font-size: 12px; color: #2d3436; }
+.dep-props {
+    display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 3px;
+    font-size: 11px; color: #636e72;
+}
+.dep-props span { white-space: nowrap; }
+.dep-props .prop-key { color: #636e72; }
+.dep-props .prop-val { color: #2d3436; font-family: monospace; }
+
+/* Summary deps */
+.summary-deps { margin-top: 8px; }
+.summary-deps-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.summary-dep-row {
+    display: flex; align-items: baseline; gap: 8px; padding: 3px 0;
+    font-size: 12px; border-bottom: 1px solid #eee;
+}
+.summary-dep-row:last-child { border-bottom: none; }
+.summary-dep-sources { color: #636e72; font-size: 11px; }
+
 /* No results */
 .no-results {
     text-align: center; padding: 40px; color: #636e72; font-size: 15px;
@@ -381,26 +450,83 @@ function renderWorkload(w) {
     return h;
 }
 
+function depTypeClass(type) {
+    if (type === 'jdbc' || type === 'mongodb') return 'db';
+    if (type === 'redis') return 'cache';
+    if (type === 'keycloak') return 'auth';
+    if (type === 'kafka' || type === 'amqp' || type === 'activemq') return 'msg';
+    return 'svc';
+}
+
+function depLabel(d) {
+    return d.type + (d.subtype ? '/' + d.subtype : '');
+}
+
+function renderDepBadges(deps) {
+    if (!deps || deps.length === 0) return '';
+    var types = [];
+    deps.forEach(function(d) {
+        var lbl = depLabel(d);
+        if (types.indexOf(lbl) === -1) types.push(lbl);
+    });
+    return types.map(function(t) {
+        var cls = depTypeClass(t.split('/')[0]);
+        return '<span class="dep-badge ' + cls + '">' + esc(t) + '</span>';
+    }).join('');
+}
+
+function renderDepProps(props) {
+    if (!props) return '';
+    var h = '<div class="dep-props">';
+    Object.keys(props).forEach(function(k) {
+        h += '<span><span class="prop-key">' + esc(k) + ':</span> <span class="prop-val">' + esc(props[k]) + '</span>' + copyBtn(props[k]) + '</span>';
+    });
+    h += '</div>';
+    return h;
+}
+
+function renderItemDeps(deps) {
+    if (!deps || deps.length === 0) return '';
+    var h = '<div class="nested-group">';
+    h += '<div class="nested-header" onclick="toggleVis(this)">' + chevron(false) + ' Dependencies (' + deps.length + ')</div>';
+    h += '<div class="nested-body hidden">';
+    deps.forEach(function(d) {
+        var cls = depTypeClass(d.type);
+        h += '<div class="dep-card">';
+        h += '<span class="dep-type ' + cls + '">' + esc(depLabel(d)) + '</span>';
+        h += '<span class="dep-url">' + esc(d.url) + '</span>' + copyBtn(d.url);
+        h += '<br><span style="color:#636e72;font-size:11px;">key: ' + esc(d.key) + '</span>';
+        h += renderDepProps(d.properties);
+        h += '</div>';
+    });
+    h += '</div></div>';
+    return h;
+}
+
 function renderSecret(s) {
     const keys = (s.keys && s.keys.length > 0) ? s.keys.join(', ') : '(vuoto)';
+    const deps = s.dependencies || [];
     let h = '<div class="tree-item" data-name="' + esc(s.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
     h += ' <span class="item-name">' + esc(s.name) + '</span>' + copyBtn(s.name);
-    h += ' <span class="item-kind">' + esc(s.type) + '</span></div>';
+    h += ' <span class="item-kind">' + esc(s.type) + '</span>' + renderDepBadges(deps) + '</div>';
     h += '<div class="item-body hidden">';
     h += kvRow('type', s.type);
     h += kvRow('keys', keys);
+    h += renderItemDeps(deps);
     h += '</div></div>';
     return h;
 }
 
 function renderConfigMap(cm) {
     const keys = (cm.keys && cm.keys.length > 0) ? cm.keys.join(', ') : '(vuoto)';
+    const deps = cm.dependencies || [];
     let h = '<div class="tree-item" data-name="' + esc(cm.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
-    h += ' <span class="item-name">' + esc(cm.name) + '</span>' + copyBtn(cm.name) + '</div>';
+    h += ' <span class="item-name">' + esc(cm.name) + '</span>' + copyBtn(cm.name) + renderDepBadges(deps) + '</div>';
     h += '<div class="item-body hidden">';
     h += kvRow('keys', keys);
+    h += renderItemDeps(deps);
     h += '</div></div>';
     return h;
 }
@@ -512,11 +638,102 @@ function renderSection(title, count, contentHtml, startOpen) {
     return h;
 }
 
+function renderSummary(ns) {
+    const s = ns.summary;
+    if (!s) return '';
+    let h = '<div class="summary-panel">';
+
+    // Totals
+    h += '<div class="summary-totals">';
+    const stats = [
+        {count: s.totals.workloads, label: 'workload'},
+        {count: s.totals.secrets, label: 'secret'},
+        {count: s.totals.configmaps, label: 'configmap'},
+        {count: s.totals.pvcs, label: 'PVC'},
+        {count: s.totals.services, label: 'service'},
+        {count: s.totals.routes, label: 'route'}
+    ];
+    stats.forEach(function(st) {
+        h += '<div class="summary-stat"><span class="stat-count">' + st.count + '</span><span class="stat-label">' + st.label + '</span></div>';
+    });
+    h += '</div>';
+
+    // Unbounded
+    const ub = s.unbounded;
+    if (ub && (ub.secrets > 0 || ub.configmaps > 0 || ub.pvcs > 0)) {
+        const parts = [];
+        if (ub.secrets > 0) parts.push(ub.secrets + ' secret');
+        if (ub.configmaps > 0) parts.push(ub.configmaps + ' configmap');
+        if (ub.pvcs > 0) parts.push(ub.pvcs + ' PVC');
+        h += '<div class="summary-unbounded">Unbounded: ' + parts.join(', ') + '</div>';
+    }
+
+    // Warnings
+    if (s.warnings && s.warnings.length > 0) {
+        s.warnings.forEach(function(w) {
+            const cls = (w.type === 'certMismatch') ? 'summary-warning error' : 'summary-warning';
+            h += '<div class="' + cls + '">';
+            h += '<div class="warn-title">' + esc(w.message) + '</div>';
+            h += '<div class="warn-detail">' + esc(w.detail) + '</div>';
+            if (w.routes && w.routes.length > 0) {
+                h += '<div class="warn-routes">';
+                w.routes.forEach(function(r) {
+                    h += esc(r.name) + ' (' + esc(r.host) + ')' + copyBtn(r.name) + '<br>';
+                });
+                h += '</div>';
+            }
+            h += '</div>';
+        });
+    }
+
+    // Dependencies
+    if (s.dependencies && s.dependencies.length > 0) {
+        h += '<div class="summary-deps">';
+        h += '<div class="summary-deps-title">Dipendenze rilevate (' + s.dependencies.length + ')</div>';
+        s.dependencies.forEach(function(d) {
+            var cls = depTypeClass(d.type);
+            h += '<div class="summary-dep-row">';
+            h += '<span class="dep-type ' + cls + '">' + esc(depLabel(d)) + '</span>';
+            var urls = d.urls || [];
+            h += '<span class="dep-url">' + esc(urls.join(', ')) + '</span>' + (urls.length > 0 ? copyBtn(urls[0]) : '');
+            // Properties
+            if (d.properties) {
+                var propParts = [];
+                Object.keys(d.properties).forEach(function(k) {
+                    propParts.push(k + ': ' + d.properties[k]);
+                });
+                if (propParts.length > 0) {
+                    h += '<span class="dep-props" style="display:inline;margin:0;gap:8px;">';
+                    propParts.forEach(function(p) {
+                        h += ' <span>' + esc(p) + '</span>';
+                    });
+                    h += '</span>';
+                }
+            }
+            h += '</div>';
+            // Sources
+            if (d.sources && d.sources.length > 0) {
+                h += '<div class="summary-dep-sources" style="padding-left:8px;margin-bottom:4px;">';
+                h += 'fonte: ' + d.sources.map(function(src) {
+                    return esc(src.kind + '/' + src.name) + ' (key: ' + esc(src.key) + ')';
+                }).join(', ');
+                h += '</div>';
+            }
+        });
+        h += '</div>';
+    }
+
+    h += '</div>';
+    return h;
+}
+
 function renderNamespace(ns) {
     let h = '<div class="ns-section" data-ns="' + esc(ns.namespace) + '">';
     h += '<div class="ns-header" onclick="toggleVis(this)">' + chevron(true);
     h += ' ' + esc(ns.namespace) + ' <span style="font-weight:400;font-size:13px;color:#b2bec3;">(' + esc(ns.context) + ')</span></div>';
     h += '<div class="ns-body">';
+
+    h += renderSummary(ns);
 
     h += renderSection('Workloads', ns.workloads ? ns.workloads.length : 0,
         renderWorkloadsSection(ns.workloads), true);
