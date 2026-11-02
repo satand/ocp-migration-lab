@@ -14,15 +14,16 @@ DEBUG="${DEBUG:-false}"
 # ==========================================
 usage() {
     cat <<EOF
-Uso: $0 [OPZIONI]
+Uso: $0 [OPZIONI] [namespace ...]
 
-Scansiona un namespace di un cluster OpenShift e produce un report completo
-di workload, secret, configmap, PVC, service e route.
+Scansiona uno o più namespace di un cluster OpenShift e produce un report
+completo di workload, secret, configmap, PVC, service e route.
+
+Se non viene specificato alcun namespace, viene usato il progetto corrente
+del context.
 
 Opzioni:
   -s <context>    Context oc/kubectl del cluster (obbligatorio)
-  -n <namespace>  Namespace da scansionare
-                  (default: progetto corrente del context)
   -o <file>       Salva il report in formato strutturato
                   (.json per JSON, .yaml/.yml per YAML)
   -v              Modalità debug
@@ -33,9 +34,9 @@ Variabili d'ambiente:
 
 Esempi:
   $0 -s cluster-a
-  $0 -s cluster-a -n my-project
-  $0 -s cluster-a -n my-project -o report.json
-  $0 -s cluster-a -n my-project -o report.yaml
+  $0 -s cluster-a my-project
+  $0 -s cluster-a ns-alpha ns-beta ns-gamma
+  $0 -s cluster-a -o report.json ns-alpha ns-beta
 EOF
     exit 1
 }
@@ -63,14 +64,14 @@ resolve_namespace() {
     local ns
     if ! ns=$(oc --context "$CONTEXT" project -q 2>/dev/null); then
         echo "Errore: impossibile leggere il progetto corrente del context '$CONTEXT'." >&2
-        echo "Specifica il namespace con -n." >&2
+        echo "Specifica il namespace come argomento posizionale." >&2
         exit 1
     fi
     ns="${ns//$'\r'/}"
     ns="${ns#"${ns%%[![:space:]]*}"}"
     ns="${ns%"${ns##*[![:space:]]}"}"
     if [[ -z "$ns" ]]; then
-        echo "Errore: il context '$CONTEXT' non ha un progetto corrente. Specificalo con -n." >&2
+        echo "Errore: il context '$CONTEXT' non ha un progetto corrente. Specifica il namespace come argomento." >&2
         exit 1
     fi
     NAMESPACE="$ns"
@@ -807,16 +808,106 @@ yaml.dump(data, sys.stdout, default_flow_style=False, allow_unicode=True, sort_k
 }
 
 # ==========================================
+# SCANSIONE SINGOLO NAMESPACE
+# ==========================================
+scan_one_namespace() {
+    local ns="$1"
+    NAMESPACE="$ns"
+
+    echo "============================================================"
+    echo "Scansione namespace: $NAMESPACE"
+    echo "  Context: $CONTEXT"
+    echo "============================================================"
+    echo ""
+
+    fetch_data
+
+    echo ""
+    echo "Analisi risorse..." >&2
+
+    WORKLOADS_JSON=$(parse_workloads "$ALL_WORKLOADS_JSON" "$DC_JSON")
+    debug "Workload trovati: $(printf '%s' "$WORKLOADS_JSON" | jq 'length')"
+
+    REFS_JSON=$(collect_all_refs "$WORKLOADS_JSON")
+    debug "Refs: $REFS_JSON"
+
+    SECRETS_JSON=$(parse_secrets "$STORAGE_JSON" "$REFS_JSON")
+    CONFIGMAPS_JSON=$(parse_configmaps "$STORAGE_JSON" "$REFS_JSON")
+    PVCS_JSON=$(parse_pvcs "$STORAGE_JSON" "$REFS_JSON")
+    SERVICES_JSON=$(parse_services "$NETWORK_JSON")
+    ROUTES_JSON_RAW=$(parse_routes "$NETWORK_JSON")
+
+    debug "Enriching routes with cert info..."
+    ROUTES_JSON=$(enrich_routes_with_certs "$ROUTES_JSON_RAW" "$SRC_APPS_DOMAIN")
+
+    echo "✔ Analisi completata" >&2
+    echo ""
+
+    print_text_report "$WORKLOADS_JSON" "$SECRETS_JSON" "$CONFIGMAPS_JSON" "$PVCS_JSON" "$SERVICES_JSON" "$ROUTES_JSON"
+
+    # Summary per namespace
+    echo ""
+    echo "============================================================"
+    local wl_count sec_count cm_count pvc_count svc_count rt_count
+    wl_count=$(printf '%s' "$WORKLOADS_JSON" | jq 'length')
+    sec_count=$(printf '%s' "$SECRETS_JSON" | jq 'length')
+    cm_count=$(printf '%s' "$CONFIGMAPS_JSON" | jq 'length')
+    pvc_count=$(printf '%s' "$PVCS_JSON" | jq 'length')
+    svc_count=$(printf '%s' "$SERVICES_JSON" | jq 'length')
+    rt_count=$(printf '%s' "$ROUTES_JSON" | jq 'length')
+    echo "Totale [$NAMESPACE]: ${wl_count} workload, ${sec_count} secret, ${cm_count} configmap, ${pvc_count} PVC, ${svc_count} service, ${rt_count} route"
+    local sec_unb cm_unb pvc_unb
+    sec_unb=$(printf '%s' "$SECRETS_JSON" | jq '[.[] | select(.unbounded)] | length')
+    cm_unb=$(printf '%s' "$CONFIGMAPS_JSON" | jq '[.[] | select(.unbounded)] | length')
+    pvc_unb=$(printf '%s' "$PVCS_JSON" | jq '[.[] | select(.unbounded)] | length')
+    if [[ "$sec_unb" -gt 0 || "$cm_unb" -gt 0 || "$pvc_unb" -gt 0 ]]; then
+        echo "Unbounded: ${sec_unb} secret, ${cm_unb} configmap, ${pvc_unb} PVC"
+    fi
+    local rt_host_bound rt_cert_bound
+    rt_host_bound=$(printf '%s' "$ROUTES_JSON" | jq '[.[] | select(.hostClusterBound == true)] | length')
+    rt_cert_bound=$(printf '%s' "$ROUTES_JSON" | jq '[.[] | select(.certInfo.clusterBound == true)] | length')
+    if [[ "$rt_host_bound" -gt 0 ]]; then
+        echo ""
+        echo "⚠ ${rt_host_bound} route con hostname legato al cluster sorgente (dominio: ${SRC_APPS_DOMAIN})"
+        echo "  L'hostname cambiera dopo la migrazione. Aggiornare DNS o configurare hostname personalizzati."
+        echo "  Route interessate:"
+        printf '%s' "$ROUTES_JSON" | jq -r '
+            [.[] | select(.hostClusterBound == true)] | .[] |
+            "    - \(.name) (host: \(.host))"
+        '
+    fi
+    if [[ "$rt_cert_bound" -gt 0 ]]; then
+        echo ""
+        echo "⚠ ${rt_cert_bound} route il cui hostname coperto da certificato legato al dominio cluster"
+        echo "  Dominio: ${SRC_APPS_DOMAIN}"
+        echo "  Il controllo considera solo il nome della route, non gli altri SAN del certificato."
+        echo "  Se l'hostname cambiera in migrazione, quel certificato non coprira il nuovo nome."
+        echo "  Route interessate:"
+        printf '%s' "$ROUTES_JSON" | jq -r '
+            [.[] | select(.certInfo.clusterBound == true)] | .[] |
+            "    - \(.name) (host: \(.host), SANs: \(.certInfo.sans | join(", ")))"
+        '
+        echo "  Azione richiesta: rigenerare i certificati per il dominio del cluster destinazione."
+    fi
+    echo "============================================================"
+
+    # Build structured report for this namespace
+    NS_REPORT_JSON=$(build_structured_report "$WORKLOADS_JSON" "$SECRETS_JSON" "$CONFIGMAPS_JSON" "$PVCS_JSON" "$SERVICES_JSON" "$ROUTES_JSON")
+    ALL_REPORTS_JSON=$(printf '%s\n%s' "$ALL_REPORTS_JSON" "$NS_REPORT_JSON" | jq -s '.[0] + [.[1]]')
+}
+
+# ==========================================
 # PARSING ARGOMENTI
 # ==========================================
-while getopts "s:n:o:vh" opt; do
-    case "$opt" in
-        s) CONTEXT="$OPTARG" ;;
-        n) NAMESPACE="$OPTARG" ;;
-        o) OUTPUT_FILE="$OPTARG" ;;
-        v) DEBUG="true" ;;
-        h) usage ;;
-        *) usage ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -s)  CONTEXT="$2"; shift 2 ;;
+        -o)  OUTPUT_FILE="$2"; shift 2 ;;
+        -v)  DEBUG="true"; shift ;;
+        -h)  usage ;;
+        --)  shift; break ;;
+        -*)  echo "Opzione sconosciuta: $1" >&2; usage ;;
+        *)   break ;;
     esac
 done
 
@@ -831,91 +922,45 @@ fi
 # ==========================================
 check_dependencies
 
-if [[ -z "$NAMESPACE" ]]; then
+# Raccogli namespace da argomenti posizionali
+NAMESPACES=()
+if [[ $# -eq 0 ]]; then
     resolve_namespace
+    NAMESPACES=("$NAMESPACE")
     echo "Namespace non specificato: uso '$NAMESPACE' (progetto corrente di $CONTEXT)"
+else
+    for ns in "$@"; do
+        duplicate=false
+        if [[ ${#NAMESPACES[@]} -gt 0 ]]; then
+            for existing in "${NAMESPACES[@]}"; do
+                if [[ "$existing" == "$ns" ]]; then
+                    duplicate=true
+                    break
+                fi
+            done
+        fi
+        if $duplicate; then
+            echo "⚠ Namespace '$ns' duplicato, ignorato." >&2
+        else
+            NAMESPACES+=("$ns")
+        fi
+    done
 fi
-
-echo "============================================================"
-echo "Scansione namespace: $NAMESPACE"
-echo "  Context: $CONTEXT"
-echo "============================================================"
-echo ""
 
 if ! oc --context "$CONTEXT" whoami &>/dev/null; then
     echo "Errore: impossibile connettersi al cluster (context: $CONTEXT)." >&2
     exit 1
 fi
 echo "✔ Connesso come '$(oc --context "$CONTEXT" whoami)'"
-
-fetch_data
-
-echo ""
-echo "Analisi risorse..." >&2
-
-WORKLOADS_JSON=$(parse_workloads "$ALL_WORKLOADS_JSON" "$DC_JSON")
-debug "Workload trovati: $(printf '%s' "$WORKLOADS_JSON" | jq 'length')"
-
-REFS_JSON=$(collect_all_refs "$WORKLOADS_JSON")
-debug "Refs: $REFS_JSON"
-
-SECRETS_JSON=$(parse_secrets "$STORAGE_JSON" "$REFS_JSON")
-CONFIGMAPS_JSON=$(parse_configmaps "$STORAGE_JSON" "$REFS_JSON")
-PVCS_JSON=$(parse_pvcs "$STORAGE_JSON" "$REFS_JSON")
-SERVICES_JSON=$(parse_services "$NETWORK_JSON")
-ROUTES_JSON_RAW=$(parse_routes "$NETWORK_JSON")
-
-debug "Enriching routes with cert info..."
-ROUTES_JSON=$(enrich_routes_with_certs "$ROUTES_JSON_RAW" "$SRC_APPS_DOMAIN")
-
-echo "✔ Analisi completata" >&2
 echo ""
 
-print_text_report "$WORKLOADS_JSON" "$SECRETS_JSON" "$CONFIGMAPS_JSON" "$PVCS_JSON" "$SERVICES_JSON" "$ROUTES_JSON"
+ALL_REPORTS_JSON="[]"
+
+for ns in "${NAMESPACES[@]}"; do
+    scan_one_namespace "$ns"
+    echo ""
+done
 
 if [[ -n "$OUTPUT_FILE" ]]; then
-    echo "" >&2
-    REPORT_JSON=$(build_structured_report "$WORKLOADS_JSON" "$SECRETS_JSON" "$CONFIGMAPS_JSON" "$PVCS_JSON" "$SERVICES_JSON" "$ROUTES_JSON")
-    write_output_file "$REPORT_JSON" "$OUTPUT_FILE"
+    write_output_file "$ALL_REPORTS_JSON" "$OUTPUT_FILE"
 fi
-
-echo ""
-echo "============================================================"
-wl_count=$(printf '%s' "$WORKLOADS_JSON" | jq 'length')
-sec_count=$(printf '%s' "$SECRETS_JSON" | jq 'length')
-cm_count=$(printf '%s' "$CONFIGMAPS_JSON" | jq 'length')
-pvc_count=$(printf '%s' "$PVCS_JSON" | jq 'length')
-svc_count=$(printf '%s' "$SERVICES_JSON" | jq 'length')
-rt_count=$(printf '%s' "$ROUTES_JSON" | jq 'length')
-echo "Totale: ${wl_count} workload, ${sec_count} secret, ${cm_count} configmap, ${pvc_count} PVC, ${svc_count} service, ${rt_count} route"
-sec_unb=$(printf '%s' "$SECRETS_JSON" | jq '[.[] | select(.unbounded)] | length')
-cm_unb=$(printf '%s' "$CONFIGMAPS_JSON" | jq '[.[] | select(.unbounded)] | length')
-pvc_unb=$(printf '%s' "$PVCS_JSON" | jq '[.[] | select(.unbounded)] | length')
-if [[ "$sec_unb" -gt 0 || "$cm_unb" -gt 0 || "$pvc_unb" -gt 0 ]]; then
-    echo "Unbounded: ${sec_unb} secret, ${cm_unb} configmap, ${pvc_unb} PVC"
-fi
-rt_host_bound=$(printf '%s' "$ROUTES_JSON" | jq '[.[] | select(.hostClusterBound == true)] | length')
-rt_cert_bound=$(printf '%s' "$ROUTES_JSON" | jq '[.[] | select(.certInfo.clusterBound == true)] | length')
-if [[ "$rt_host_bound" -gt 0 ]]; then
-    echo ""
-    echo "⚠ ${rt_host_bound} route con hostname legato al cluster sorgente (dominio: ${SRC_APPS_DOMAIN})"
-    echo "  L'hostname cambiera dopo la migrazione. Aggiornare DNS o configurare hostname personalizzati."
-    echo "  Route interessate:"
-    printf '%s' "$ROUTES_JSON" | jq -r '
-        [.[] | select(.hostClusterBound == true)] | .[] |
-        "    - \(.name) (host: \(.host))"
-    '
-fi
-if [[ "$rt_cert_bound" -gt 0 ]]; then
-    echo ""
-    echo "⚠ ${rt_cert_bound} route il cui hostname è coperto da un certificato legato al dominio cluster '${SRC_APPS_DOMAIN}'"
-    echo "  Il controllo considera solo il nome della route, non gli altri SAN del certificato."
-    echo "  Se l'hostname cambierà in migrazione, quel certificato non coprirà il nuovo nome."
-    echo "  Route interessate:"
-    printf '%s' "$ROUTES_JSON" | jq -r '
-        [.[] | select(.certInfo.clusterBound == true)] | .[] |
-        "    - \(.name) (host: \(.host), SANs: \(.certInfo.sans | join(", ")))"
-    '
-    echo "  Azione richiesta: rigenerare i certificati per il dominio del cluster destinazione."
-fi
-echo "============================================================"
