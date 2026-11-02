@@ -241,7 +241,7 @@ build_replace_map() {
     local joined
     joined=$(printf '%s,' "${pairs[@]}")
     joined="${joined%,}"
-    REPLACE_MAP_JSON=$(printf '[%s]' "$joined" | jq '[sort_by(-.src | length)]')
+    REPLACE_MAP_JSON=$(printf '[%s]' "$joined" | jq 'sort_by(-(.src | length))')
     debug "REPLACE_MAP_JSON=$REPLACE_MAP_JSON"
 }
 
