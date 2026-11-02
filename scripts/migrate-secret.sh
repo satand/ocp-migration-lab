@@ -294,13 +294,13 @@ collect_cluster_references() {
     local json="$1" rtype="$2" rname="$3" decode="$4"
     [[ "$SRC_PATTERNS_JSON" == "[]" ]] && return 0
 
-    local out row
+    local out row n i
     if ! out=$(jq -c \
         --argjson patterns "$SRC_PATTERNS_JSON" \
         --argjson decode "$decode" \
         --arg rtype "$rtype" \
         --arg rname "$rname" '
-            .data // {}
+            [ .data // {}
             | to_entries[]
             | .key as $k
             | (if $decode then (.value | try @base64d catch empty) else (.value // empty) end) as $v
@@ -317,14 +317,18 @@ collect_cluster_references() {
                     | if ($flat | length) > 120 then $flat[0:117] + "..." else $flat end
                 )
               }
+            ]
         ' <<< "$json"); then
         echo "Errore: scansione riferimenti non riuscita per $rtype '$rname'." >&2
         return 0
     fi
 
-    while IFS= read -r row; do
-        [[ -n "$row" ]] && CLUSTER_REF_WARNINGS+=("$row")
-    done <<< "$out"
+    n=$(printf '%s' "$out" | jq 'length')
+    for (( i = 0; i < n; i++ )); do
+        row=$(printf '%s' "$out" | jq -c ".[$i]")
+        [[ -n "$row" && "$row" != "null" ]] && CLUSTER_REF_WARNINGS+=("$row")
+    done
+    return 0
 }
 
 replace_domain_refs() {
