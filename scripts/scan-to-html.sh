@@ -198,7 +198,6 @@ body {
 }
 .kv-val.warn { color: #d63031; font-weight: 600; }
 .kv-val.warn-orange { color: #e17055; font-weight: 600; }
-
 /* Copy button */
 .copy-btn {
     background: none; border: none; cursor: pointer; color: #b2bec3; padding: 0 4px;
@@ -366,6 +365,31 @@ function esc(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function shArg(s) {
+    s = String(s == null ? '' : s);
+    if (/^[A-Za-z0-9._-]+$/.test(s)) return s;
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+function migrateCmd(ns, script, flags, name) {
+    return './scripts/' + script + ' -n ' + shArg(ns) + ' ' + flags + ' ' + shArg(name);
+}
+
+function migrateRow(cmd) {
+    return '<div class="kv-row"><span class="kv-key">migrate</span><span class="kv-val">' + esc(cmd) + '</span>' + copyBtn(cmd) + '</div>';
+}
+
+function isClusterManagedSecret(s) {
+    var type = s.type || '';
+    var name = s.name || '';
+    return type === 'kubernetes.io/service-account-token'
+        || type === 'kubernetes.io/dockercfg'
+        || type === 'kubernetes.io/dockerconfigjson'
+        || name.indexOf('builder-') === 0
+        || name.indexOf('deployer-') === 0
+        || name.indexOf('default-') === 0;
+}
+
 function copyBtn(val) {
     return '<button class="copy-btn" onclick="copyVal(this,event)" data-val="' + esc(String(val)).replace(/'/g,'&#39;') + '">&#128203;<span class="tooltip">Copied!</span></button>';
 }
@@ -503,7 +527,7 @@ function renderItemDeps(deps) {
     return h;
 }
 
-function renderSecret(s) {
+function renderSecret(ns, s) {
     const keys = (s.keys && s.keys.length > 0) ? s.keys.join(', ') : '(vuoto)';
     const deps = s.dependencies || [];
     let h = '<div class="tree-item" data-name="' + esc(s.name) + '">';
@@ -511,6 +535,7 @@ function renderSecret(s) {
     h += ' <span class="item-name">' + esc(s.name) + '</span>' + copyBtn(s.name);
     h += ' <span class="item-kind">' + esc(s.type) + '</span>' + renderDepBadges(deps) + '</div>';
     h += '<div class="item-body hidden">';
+    if (!isClusterManagedSecret(s)) h += migrateRow(migrateCmd(ns, 'migrate-secret.sh', '-y', s.name));
     h += kvRow('type', s.type);
     h += kvRow('keys', keys);
     h += renderItemDeps(deps);
@@ -518,24 +543,26 @@ function renderSecret(s) {
     return h;
 }
 
-function renderConfigMap(cm) {
+function renderConfigMap(ns, cm) {
     const keys = (cm.keys && cm.keys.length > 0) ? cm.keys.join(', ') : '(vuoto)';
     const deps = cm.dependencies || [];
     let h = '<div class="tree-item" data-name="' + esc(cm.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
     h += ' <span class="item-name">' + esc(cm.name) + '</span>' + copyBtn(cm.name) + renderDepBadges(deps) + '</div>';
     h += '<div class="item-body hidden">';
+    h += migrateRow(migrateCmd(ns, 'migrate-cm.sh', '-y -R', cm.name));
     h += kvRow('keys', keys);
     h += renderItemDeps(deps);
     h += '</div></div>';
     return h;
 }
 
-function renderPVC(pvc) {
+function renderPVC(ns, pvc) {
     let h = '<div class="tree-item" data-name="' + esc(pvc.name) + '">';
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
     h += ' <span class="item-name">' + esc(pvc.name) + '</span>' + copyBtn(pvc.name) + '</div>';
     h += '<div class="item-body hidden">';
+    h += migrateRow(migrateCmd(ns, 'migrate-pvc.sh', '-y', pvc.name));
     h += kvRow('capacity', pvc.capacity);
     h += kvRow('accessModes', pvc.accessModes);
     h += kvRow('storageClass', pvc.storageClass);
@@ -561,7 +588,7 @@ function renderService(svc) {
     return h;
 }
 
-function renderRoute(r) {
+function renderRoute(ns, r) {
     let badges = '';
     if (r.hostClusterBound) badges += '<span class="badge-warn">host cluster-bound</span>';
     if (r.certInfo && r.certInfo.clusterBound) badges += '<span class="badge-err">cert cluster-bound</span>';
@@ -572,6 +599,7 @@ function renderRoute(r) {
     h += '<div class="item-header" onclick="toggleVis(this)">' + chevron(false);
     h += ' <span class="item-name">' + esc(r.name) + '</span>' + copyBtn(r.name) + badges + '</div>';
     h += '<div class="item-body hidden">';
+    h += migrateRow(migrateCmd(ns, 'migrate-route.sh', '-y', r.name));
     h += kvRow('host', r.host);
     h += kvRow('path', r.path);
     h += kvRow('service', r.service);
@@ -738,18 +766,18 @@ function renderNamespace(ns) {
     h += renderSection('Workloads', ns.workloads ? ns.workloads.length : 0,
         renderWorkloadsSection(ns.workloads), true);
     h += renderSection('Secrets', ns.secrets ? ns.secrets.length : 0,
-        renderBoundedSection(ns.secrets, renderSecret), true);
+        renderBoundedSection(ns.secrets, function(s) { return renderSecret(ns.namespace, s); }), true);
     h += renderSection('ConfigMaps', ns.configmaps ? ns.configmaps.length : 0,
-        renderBoundedSection(ns.configmaps, renderConfigMap), true);
+        renderBoundedSection(ns.configmaps, function(cm) { return renderConfigMap(ns.namespace, cm); }), true);
     h += renderSection('PVCs', ns.pvcs ? ns.pvcs.length : 0,
-        renderBoundedSection(ns.pvcs, renderPVC), true);
+        renderBoundedSection(ns.pvcs, function(pvc) { return renderPVC(ns.namespace, pvc); }), true);
     h += renderSection('Services', ns.services ? ns.services.length : 0,
         ns.services && ns.services.length > 0
             ? ns.services.map(renderService).join('')
             : '<div style="padding:8px 24px;color:#636e72;font-size:13px;">(nessuno)</div>', true);
     h += renderSection('Routes', ns.routes ? ns.routes.length : 0,
         ns.routes && ns.routes.length > 0
-            ? ns.routes.map(renderRoute).join('')
+            ? ns.routes.map(function(r) { return renderRoute(ns.namespace, r); }).join('')
             : '<div style="padding:8px 24px;color:#636e72;font-size:13px;">(nessuno)</div>', true);
 
     h += '</div></div>';

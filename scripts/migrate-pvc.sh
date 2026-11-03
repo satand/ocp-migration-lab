@@ -41,6 +41,7 @@ Opzioni:
   -c <sc>         StorageClass da usare sul cluster destinazione
                   (ha precedenza sul mapping e sulla SC del sorgente)
   -m <file>       File di mapping StorageClass (formato: sc-sorgente=sc-destinazione)
+                  (ha precedenza su SC_MAPPING_FILE)
   -C              Copia anche il contenuto (dati) del PVC tramite pod temporanei
   -y              Salta la conferma interattiva
   -v              Modalità debug
@@ -49,6 +50,7 @@ Opzioni:
 Variabili d'ambiente:
   SRC_CONTEXT       Alternativa a -s
   DST_CONTEXT       Alternativa a -d
+  SC_MAPPING_FILE   File di mapping StorageClass, alternativa a -m
   RSYNC_POD_IMAGE   Immagine per i pod temporanei di copia dati
                     (default: registry.access.redhat.com/ubi9/ubi-minimal:latest)
 
@@ -64,6 +66,9 @@ Esempi:
 
   # Mapping StorageClass per migrazioni batch (una coppia per riga: sorgente=destinazione)
   $0 -s cluster-a -d cluster-b -n my-project -m mapping-sc.txt -y my-pvc
+
+  # Stesso mapping letto dall'ambiente (SRC_CONTEXT e DST_CONTEXT già impostati)
+  SC_MAPPING_FILE=mapping-sc.txt $0 -n my-project -y my-pvc
 
   # Senza conferma interattiva (per scripting)
   $0 -s cluster-a -d cluster-b -n my-project -y my-pvc
@@ -444,7 +449,7 @@ copy_pvc_data() {
 # ==========================================
 PVC_NAMESPACE=""
 DST_SC=""
-SC_MAPPING_FILE=""
+SC_MAPPING_FILE="${SC_MAPPING_FILE:-}"
 COPY_DATA=false
 SKIP_CONFIRM=false
 

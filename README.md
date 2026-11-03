@@ -86,7 +86,7 @@ A partire dal JSON prodotto dallo scan si può generare un report HTML autoconte
 Il report offre:
 - filtro per namespace e ricerca libera case-insensitive su tutti i nomi degli oggetti
 - sezioni collassabili con Expand All / Collapse All
-- bottone per copiare in clipboard nomi di risorse e valori
+- bottone per copiare in clipboard nomi di risorse, valori e il comando di migrazione di ConfigMap, Secret, PVC e Route
 - badge di warning sulle route (hostname/certificato cluster-bound)
 - pannello di riepilogo con totali, warning e dipendenze rilevate
 - badge colorati per tipo di dipendenza (database, cache, auth, messaging, servizio)
@@ -135,7 +135,12 @@ Il mapping viene costruito automaticamente dai domini dei due cluster (es. `apps
 
 ### PVC
 
-Per i PVC, `-c` forza la StorageClass di destinazione e `-m` legge un mapping `sorgente=destinazione`. Se la StorageClass non esiste sul destinazione, lo script chiede quale usare.
+Per i PVC, `-c` forza la StorageClass di destinazione e `-m` legge un mapping `sorgente=destinazione`. Lo stesso file si può passare con `SC_MAPPING_FILE`, così il comando non ha bisogno di `-m`. Se la StorageClass non esiste sul destinazione, lo script chiede quale usare.
+
+```bash
+export SRC_CONTEXT=src-cluster DST_CONTEXT=dst-cluster SC_MAPPING_FILE=sc-matrix.properties
+./scripts/migrate-pvc.sh -n my-project -y data
+```
 
 ## Immagini
 
