@@ -1098,11 +1098,6 @@ scan_one_namespace() {
     echo "✔ Analisi completata" >&2
     echo ""
 
-    print_text_report "$WORKLOADS_JSON" "$SECRETS_JSON" "$CONFIGMAPS_JSON" "$PVCS_JSON" "$SERVICES_JSON" "$ROUTES_JSON"
-
-    # Summary per namespace
-    echo ""
-    echo "============================================================"
     local wl_count sec_count cm_count pvc_count svc_count rt_count
     wl_count=$(printf '%s' "$WORKLOADS_JSON" | jq 'length')
     sec_count=$(printf '%s' "$SECRETS_JSON" | jq 'length')
@@ -1110,6 +1105,18 @@ scan_one_namespace() {
     pvc_count=$(printf '%s' "$PVCS_JSON" | jq 'length')
     svc_count=$(printf '%s' "$SERVICES_JSON" | jq 'length')
     rt_count=$(printf '%s' "$ROUTES_JSON" | jq 'length')
+
+    if [[ $((wl_count + sec_count + cm_count + pvc_count + svc_count + rt_count)) -eq 0 ]]; then
+        echo "⚠ Namespace '$NAMESPACE' non contiene risorse da riportare: escluso dal report."
+        echo "============================================================"
+        return 0
+    fi
+
+    print_text_report "$WORKLOADS_JSON" "$SECRETS_JSON" "$CONFIGMAPS_JSON" "$PVCS_JSON" "$SERVICES_JSON" "$ROUTES_JSON"
+
+    # Summary per namespace
+    echo ""
+    echo "============================================================"
     echo "Totale [$NAMESPACE]: ${wl_count} workload, ${sec_count} secret, ${cm_count} configmap, ${pvc_count} PVC, ${svc_count} service, ${rt_count} route"
     local sec_unb cm_unb pvc_unb
     sec_unb=$(printf '%s' "$SECRETS_JSON" | jq '[.[] | select(.unbounded)] | length')
@@ -1233,6 +1240,13 @@ echo ""
 ALL_REPORTS_JSON="[]"
 
 for ns in "${NAMESPACES[@]}"; do
+    if ! oc --context "$CONTEXT" get namespace "$ns" &>/dev/null; then
+        echo "============================================================"
+        echo "⚠ Namespace '$ns' non trovato sul cluster (context: $CONTEXT): escluso dal report."
+        echo "============================================================"
+        echo ""
+        continue
+    fi
     scan_one_namespace "$ns"
     echo ""
 done

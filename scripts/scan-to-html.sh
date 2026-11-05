@@ -755,6 +755,15 @@ function renderSummary(ns) {
     return h;
 }
 
+function nsHasResources(ns) {
+    return (ns.workloads && ns.workloads.length)
+        || (ns.secrets && ns.secrets.length)
+        || (ns.configmaps && ns.configmaps.length)
+        || (ns.pvcs && ns.pvcs.length)
+        || (ns.services && ns.services.length)
+        || (ns.routes && ns.routes.length);
+}
+
 function renderNamespace(ns) {
     let h = '<div class="ns-section" data-ns="' + esc(ns.namespace) + '">';
     h += '<div class="ns-header" onclick="toggleVis(this)">' + chevron(true);
@@ -787,8 +796,9 @@ function renderNamespace(ns) {
 // Build DOM
 (function() {
     // Populate namespace filter
+    const visibleReports = REPORT_DATA.filter(nsHasResources);
     const nsSet = [];
-    REPORT_DATA.forEach(function(ns) {
+    visibleReports.forEach(function(ns) {
         if (nsSet.indexOf(ns.namespace) === -1) nsSet.push(ns.namespace);
     });
     nsSet.forEach(function(n) {
@@ -800,8 +810,9 @@ function renderNamespace(ns) {
 
     // Render all namespaces
     let html = '';
-    REPORT_DATA.forEach(function(ns) { html += renderNamespace(ns); });
+    visibleReports.forEach(function(ns) { html += renderNamespace(ns); });
     app.insertAdjacentHTML('beforeend', html);
+    if (visibleReports.length === 0) noResults.style.display = 'block';
 })();
 
 // ========== FILTERING ==========
