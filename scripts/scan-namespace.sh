@@ -246,23 +246,69 @@ def sibling_pfx($entries; $pfx; $pat):
 def inval($pat):
   ([try capture($pat; "i") catch null] | if length > 0 then .[0].v else null end);
 
+def match_re($s; $pat):
+  [try ($s | capture($pat; "i")) catch null] | if length > 0 then .[0] else null end;
+
+# Easy Connect: jdbc:oracle:thin:@//host:port/service[:instance][?params]
+#               jdbc:oracle:thin:@tcps://host:port/service[:instance][?params]
+def oracle_easy($line):
+  match_re($line; "jdbc:oracle:thin:@(?<scheme>//|tcps://)(?<host>[^:/?]+)(?::(?<port>[0-9]+))?/(?<service>[^:/?]+)(?::(?<instance>[^/?]+))?(?:\\?(?<params>[^\\s\"]*))?");
+
+# LDAP: jdbc:oracle:thin:@ldap://host:port[,host:port]/service,context
+def oracle_ldap($line):
+  match_re($line; "jdbc:oracle:thin:@(?<scheme>ldaps?://)(?<hosts>[^/\\s]+)/(?<service>[^,\\s]+),(?<context>[^\\s\"]+)");
+
 def detect_deps:
   . as $entries |
   [ $entries[] |
     select(.value != null and (.value | type == "string") and (.value | length > 0)) |
     .key as $k | .value as $v |
     (
-      # --- JDBC ---
+      # --- Oracle JDBC (Easy Connect e LDAP) ---
+      (if ($v | test("jdbc:oracle:thin:"; "i")) then
+        ($v | split("\n")[] | select(test("jdbc:oracle:thin:"; "i")) | . as $line |
+          oracle_easy($line) as $e | oracle_ldap($line) as $l |
+          if $e then
+            {type:"jdbc", subtype:"oracle", key:$k,
+             url:("jdbc:oracle:thin:@" + $e.scheme + $e.host
+                  + (if $e.port then ":" + $e.port else "" end)
+                  + "/" + $e.service
+                  + (if $e.instance then ":" + $e.instance else "" end)
+                  + (if $e.params then "?" + $e.params else "" end)),
+             properties:({
+               scheme:(if $e.scheme == "tcps://" then "tcps" else "tcp" end),
+               host:$e.host,
+               port:$e.port,
+               service:$e.service,
+               instance:$e.instance,
+               params:$e.params,
+               username:(sibling($entries; "(?:^|[._-])user(?:name)?$") // ($v | inval("(?:username|user)[=: ]+(?<v>[^\\s\"]+)")))
+             } | clean_props)}
+          elif $l then
+            {type:"jdbc", subtype:"oracle", key:$k,
+             url:("jdbc:oracle:thin:@" + $l.scheme + $l.hosts + "/" + $l.service + "," + $l.context),
+             properties:({
+               scheme:(if ($l.scheme | startswith("ldaps")) then "ldaps" else "ldap" end),
+               host:$l.hosts,
+               service:$l.service,
+               context:$l.context,
+               username:(sibling($entries; "(?:^|[._-])user(?:name)?$") // ($v | inval("(?:username|user)[=: ]+(?<v>[^\\s\"]+)")))
+             } | clean_props)}
+          else empty end)
+       else empty end),
+
+      # --- JDBC (altri driver) ---
       (if ($v | test("jdbc:"; "i")) then
-        (try ($v | capture("(?<url>jdbc:(?<sub>[a-z0-9]+):[/]*(?:(?<user>[^:@\\s]+)(?::[^@\\s]*)?@)?(?<host>[^:/\\s;,\"]+)(?::(?<port>[0-9]+))?(?:[/](?<db>[^?;\\s\"]+))?)"; "i")) catch null) as $m |
-        if $m then {type:"jdbc", subtype:$m.sub, key:$k, url:$m.url,
-          properties:({
-            host:$m.host,
-            port:($m.port // null),
-            database:($m.db // ($v | inval("database[=: ]+(?<v>[^\\s\"]+)")) // sibling($entries; "database|db[._-]?name|dbname")),
-            username:($m.user // ($v | inval("(?:username|user)[=: ]+(?<v>[^\\s\"]+)")) // sibling($entries; "username|db[._-]?user"))
-          } | clean_props)}
-        else empty end
+        ($v | split("\n")[] | select(test("jdbc:"; "i")) | select(test("jdbc:oracle:"; "i") | not) |
+          match_re(.; "(?<url>jdbc:(?<sub>[a-z0-9]+):[/]*(?:(?<user>[^:@\\s]+)(?::[^@\\s]*)?@)?(?<host>[^:/\\s;,\"]+)(?::(?<port>[0-9]+))?(?:[/](?<db>[^?;\\s\"]+))?)") as $m |
+          if $m then {type:"jdbc", subtype:$m.sub, key:$k, url:$m.url,
+            properties:({
+              host:$m.host,
+              port:($m.port // null),
+              database:($m.db // ($v | inval("database[=: ]+(?<v>[^\\s\"]+)")) // sibling($entries; "database|db[._-]?name|dbname")),
+              username:($m.user // ($v | inval("(?:username|user)[=: ]+(?<v>[^\\s\"]+)")) // sibling($entries; "username|db[._-]?user"))
+            } | clean_props)}
+          else empty end)
        else empty end),
 
       # --- MongoDB (URL) ---

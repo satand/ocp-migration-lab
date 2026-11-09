@@ -48,7 +48,7 @@ Durante la scansione di ConfigMap e Secret, lo script analizza i valori delle si
 
 | Tipo | Pattern riconosciuti | Proprietà estratte |
 |---|---|---|
-| **JDBC** | `jdbc:postgresql://`, `jdbc:mysql://`, `jdbc:oracle:` … | host, port, database, username |
+| **JDBC** | `jdbc:postgresql://`, `jdbc:mysql://`, Oracle Easy Connect (`@//`, `@tcps://`) e LDAP (`@ldap://`, `@ldaps://`) | host, port, database oppure service, instance, context, username |
 | **MongoDB** | `mongodb://`, `mongodb+srv://`, chiave con `mongo*.host` | host, port, database, authDatabase, username |
 | **Redis** | `redis://`, `rediss://` | host, port, database |
 | **Keycloak** | URL con `/realms/`, hostname contenente `keycloak` o `sso` | host, port, realm, clientId |
