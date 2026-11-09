@@ -184,6 +184,11 @@ def format_container($volumes):
         liveness:  (.livenessProbe  | format_probe),
         readiness: (.readinessProbe | format_probe),
         startup:   (.startupProbe   | format_probe),
+        ports: [(.ports // [])[] | {
+            name: (.name // null),
+            containerPort: .containerPort,
+            protocol: (.protocol // "TCP")
+        }],
         secrets:   $refs.secrets,
         configmaps: $refs.configmaps,
         pvcs:      $refs.pvcs
@@ -842,6 +847,7 @@ print_text_report() {
                 "\n        liveness:    \(.liveness)" +
                 "\n        readiness:   \(.readiness)" +
                 "\n        startup:     \(.startup)" +
+                "\n        ports:       \(if ((.ports // []) | length) > 0 then [.ports[] | (if .name then "\(.name):" else "" end) + "\(.containerPort)/\(.protocol)"] | join(", ") else "N/A" end)" +
                 "\n        secrets:     \(if (.secrets | length) > 0 then .secrets | join(", ") else "N/A" end)" +
                 "\n        configmaps:  \(if (.configmaps | length) > 0 then .configmaps | join(", ") else "N/A" end)" +
                 "\n        pvcs:        \(if (.pvcs | length) > 0 then .pvcs | join(", ") else "N/A" end)"
@@ -852,6 +858,7 @@ print_text_report() {
                     "\n      [\(.name)] image: \(.image)" +
                     "\n        requests:    cpu=\(.requests.cpu), memory=\(.requests.memory)" +
                     "\n        limits:      cpu=\(.limits.cpu), memory=\(.limits.memory)" +
+                    "\n        ports:       \(if ((.ports // []) | length) > 0 then [.ports[] | (if .name then "\(.name):" else "" end) + "\(.containerPort)/\(.protocol)"] | join(", ") else "N/A" end)" +
                     "\n        secrets:     \(if (.secrets | length) > 0 then .secrets | join(", ") else "N/A" end)" +
                     "\n        configmaps:  \(if (.configmaps | length) > 0 then .configmaps | join(", ") else "N/A" end)" +
                     "\n        pvcs:        \(if (.pvcs | length) > 0 then .pvcs | join(", ") else "N/A" end)"

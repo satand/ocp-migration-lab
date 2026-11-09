@@ -434,6 +434,12 @@ function renderContainer(c) {
     if (c.liveness !== undefined) h += kvRow('liveness', c.liveness);
     if (c.readiness !== undefined) h += kvRow('readiness', c.readiness);
     if (c.startup !== undefined) h += kvRow('startup', c.startup);
+    const portList = (c.ports && c.ports.length > 0)
+        ? c.ports.map(function(p) {
+            return (p.name ? p.name + ':' : '') + p.containerPort + '/' + (p.protocol || 'TCP');
+        }).join(', ')
+        : 'N/A';
+    h += kvRow('ports', portList);
     const secs = (c.secrets && c.secrets.length > 0) ? c.secrets.join(', ') : 'N/A';
     const cms = (c.configmaps && c.configmaps.length > 0) ? c.configmaps.join(', ') : 'N/A';
     const pvcs = (c.pvcs && c.pvcs.length > 0) ? c.pvcs.join(', ') : 'N/A';
